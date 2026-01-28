@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+data:
+  APP_PORT: "8080"
+  APP_JWT_EXP_MINUTES: "60"
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_USER: "vkube"
+  DB_NAME: "vkube"
+  LDAP_URL: "ldap://ldap.example.com:389"
+  LDAP_BASE_DN: "dc=example,dc=com"
+  LDAP_BIND_DN: "cn=admin,dc=example,dc=com"
+  POLL_INTERVAL_SECONDS: "15"
+  MAX_CLUSTERS_PER_USER: "20"
+
