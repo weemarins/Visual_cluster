@@ -9,12 +9,12 @@ import (
 )
 
 // NewClient cria um clientset a partir de um kubeconfig em texto puro.
-func NewClient(kubeconfig []byte) (*kubernetes.Clientset, error) {
-	config, err := buildConfigFromBytes(kubeconfig)
+func buildConfigFromBytes(kubeconfig []byte) (*rest.Config, error) {
+	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("erro ao criar REST config: %w", err)
 	}
-	return kubernetes.NewForConfig(config)
+	return cfg, nil
 }
 
 func buildConfigFromBytes(kubeconfig []byte) (*rest.Config, error) {
