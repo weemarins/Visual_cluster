@@ -23,10 +23,23 @@ spec:
       labels:
         app: frontend
     spec:
+      volumes:
+        - name: nginx-cache
+          emptyDir: {}
       containers:
         - name: frontend
           image: ghcr.io/weemarins/vkube-frontend:latest
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 80
+            - containerPort: 8080
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+
 
