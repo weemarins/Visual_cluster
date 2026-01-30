@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 	"time"
+	"log"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -11,7 +12,12 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// GraphNode representa um recurso no grafo.
+/*
+========================
+ MODELO DE DOMÍNIO (K8s)
+========================
+*/
+
 type GraphNode struct {
 	ID        string            `json:"id"`
 	Kind      string            `json:"kind"`
@@ -20,21 +26,54 @@ type GraphNode struct {
 	Labels    map[string]string `json:"labels,omitempty"`
 }
 
-// GraphEdge representa uma relação entre recursos.
 type GraphEdge struct {
 	ID     string `json:"id"`
 	Source string `json:"source"`
 	Target string `json:"target"`
 }
 
-// ClusterGraph representa o grafo completo retornado para o frontend.
 type ClusterGraph struct {
 	Nodes []GraphNode `json:"nodes"`
 	Edges []GraphEdge `json:"edges"`
 }
 
-// BuildTopologyGraph descobre recursos e constrói o grafo.
-func BuildTopologyGraph(ctx context.Context, client *kubernetes.Clientset, namespaceFilter string) (*ClusterGraph, error) {
+/*
+========================
+ MODELO DE VISUALIZAÇÃO (React Flow)
+========================
+*/
+
+type RFNode struct {
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type,omitempty"`
+	Position map[string]float64     `json:"position"`
+	Data     map[string]interface{} `json:"data"`
+}
+
+type RFEdge struct {
+	ID     string `json:"id"`
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
+type RFGraph struct {
+	Nodes []RFNode `json:"nodes"`
+	Edges []RFEdge `json:"edges"`
+}
+
+/*
+========================
+ BUILD TOPOLOGY GRAPH
+========================
+*/
+
+func BuildTopologyGraph(
+	ctx context.Context,
+	client *kubernetes.Clientset,
+	namespaceFilter string,
+) (*RFGraph, error) {
+
+	// -------- Grafo de domínio --------
 	g := &ClusterGraph{
 		Nodes: []GraphNode{},
 		Edges: []GraphEdge{},
@@ -43,12 +82,7 @@ func BuildTopologyGraph(ctx context.Context, client *kubernetes.Clientset, names
 	timeoutCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	nsSelector := metav1.ListOptions{}
-	if namespaceFilter != "" && namespaceFilter != "all" {
-		// Vamos apenas usar o namespaceFilter quando listarmos recursos namespaced.
-	}
-
-	// Nodes (não namespaced)
+	// -------- Nodes (cluster-wide) --------
 	nodes, err := client.CoreV1().Nodes().List(timeoutCtx, metav1.ListOptions{})
 	if err == nil {
 		for _, n := range nodes.Items {
@@ -61,10 +95,16 @@ func BuildTopologyGraph(ctx context.Context, client *kubernetes.Clientset, names
 		}
 	}
 
-	// Namespaces
-	namespaces, err := client.CoreV1().Namespaces().List(timeoutCtx, nsSelector)
-	if err == nil {
-		for _, ns := range namespaces.Items {
+	// -------- Namespaces --------
+	namespaces, err := client.CoreV1().Namespaces().List(timeoutCtx, metav1.ListOptions{})
+	if err != nil {
+		return &RFGraph{Nodes: []RFNode{}, Edges: []RFEdge{}}, nil
+	}
+
+	nsList := []string{}
+	for _, ns := range namespaces.Items {
+		if namespaceFilter == "" || namespaceFilter == "all" || namespaceFilter == ns.Name {
+			nsList = append(nsList, ns.Name)
 			g.Nodes = append(g.Nodes, GraphNode{
 				ID:   "ns:" + ns.Name,
 				Kind: "Namespace",
@@ -73,21 +113,19 @@ func BuildTopologyGraph(ctx context.Context, client *kubernetes.Clientset, names
 		}
 	}
 
-	nsList := []string{}
-	for _, ns := range namespaces.Items {
-		if namespaceFilter == "" || namespaceFilter == "all" || namespaceFilter == ns.Name {
-			nsList = append(nsList, ns.Name)
-		}
-	}
-
-	// Para cada namespace relevante, buscamos os recursos e montamos edges básicos.
+	// -------- Recursos por namespace --------
 	for _, ns := range nsList {
-		// Deployments
 		deps, _ := client.AppsV1().Deployments(ns).List(timeoutCtx, metav1.ListOptions{})
+		stsList, _ := client.AppsV1().StatefulSets(ns).List(timeoutCtx, metav1.ListOptions{})
+		dsList, _ := client.AppsV1().DaemonSets(ns).List(timeoutCtx, metav1.ListOptions{})
+		rsList, _ := client.AppsV1().ReplicaSets(ns).List(timeoutCtx, metav1.ListOptions{})
+		pods, _ := client.CoreV1().Pods(ns).List(timeoutCtx, metav1.ListOptions{})
+		svcs, _ := client.CoreV1().Services(ns).List(timeoutCtx, metav1.ListOptions{})
+		hpas, _ := client.AutoscalingV2().HorizontalPodAutoscalers(ns).List(timeoutCtx, metav1.ListOptions{})
+
 		for _, d := range deps.Items {
-			depID := "deploy:" + ns + ":" + d.Name
 			g.Nodes = append(g.Nodes, GraphNode{
-				ID:        depID,
+				ID:        "deploy:" + ns + ":" + d.Name,
 				Kind:      "Deployment",
 				Name:      d.Name,
 				Namespace: ns,
@@ -95,12 +133,9 @@ func BuildTopologyGraph(ctx context.Context, client *kubernetes.Clientset, names
 			})
 		}
 
-		// StatefulSets
-		stsList, _ := client.AppsV1().StatefulSets(ns).List(timeoutCtx, metav1.ListOptions{})
 		for _, s := range stsList.Items {
-			stsID := "sts:" + ns + ":" + s.Name
 			g.Nodes = append(g.Nodes, GraphNode{
-				ID:        stsID,
+				ID:        "sts:" + ns + ":" + s.Name,
 				Kind:      "StatefulSet",
 				Name:      s.Name,
 				Namespace: ns,
@@ -108,12 +143,9 @@ func BuildTopologyGraph(ctx context.Context, client *kubernetes.Clientset, names
 			})
 		}
 
-		// DaemonSets
-		dsList, _ := client.AppsV1().DaemonSets(ns).List(timeoutCtx, metav1.ListOptions{})
 		for _, d := range dsList.Items {
-			dID := "ds:" + ns + ":" + d.Name
 			g.Nodes = append(g.Nodes, GraphNode{
-				ID:        dID,
+				ID:        "ds:" + ns + ":" + d.Name,
 				Kind:      "DaemonSet",
 				Name:      d.Name,
 				Namespace: ns,
@@ -121,12 +153,9 @@ func BuildTopologyGraph(ctx context.Context, client *kubernetes.Clientset, names
 			})
 		}
 
-		// ReplicaSets
-		rsList, _ := client.AppsV1().ReplicaSets(ns).List(timeoutCtx, metav1.ListOptions{})
 		for _, rs := range rsList.Items {
-			rsID := "rs:" + ns + ":" + rs.Name
 			g.Nodes = append(g.Nodes, GraphNode{
-				ID:        rsID,
+				ID:        "rs:" + ns + ":" + rs.Name,
 				Kind:      "ReplicaSet",
 				Name:      rs.Name,
 				Namespace: ns,
@@ -134,12 +163,9 @@ func BuildTopologyGraph(ctx context.Context, client *kubernetes.Clientset, names
 			})
 		}
 
-		// Pods
-		pods, _ := client.CoreV1().Pods(ns).List(timeoutCtx, metav1.ListOptions{})
 		for _, p := range pods.Items {
-			podID := "pod:" + ns + ":" + p.Name
 			g.Nodes = append(g.Nodes, GraphNode{
-				ID:        podID,
+				ID:        "pod:" + ns + ":" + p.Name,
 				Kind:      "Pod",
 				Name:      p.Name,
 				Namespace: ns,
@@ -147,12 +173,9 @@ func BuildTopologyGraph(ctx context.Context, client *kubernetes.Clientset, names
 			})
 		}
 
-		// Services
-		svcs, _ := client.CoreV1().Services(ns).List(timeoutCtx, metav1.ListOptions{})
 		for _, s := range svcs.Items {
-			svcID := "svc:" + ns + ":" + s.Name
 			g.Nodes = append(g.Nodes, GraphNode{
-				ID:        svcID,
+				ID:        "svc:" + ns + ":" + s.Name,
 				Kind:      "Service",
 				Name:      s.Name,
 				Namespace: ns,
@@ -160,12 +183,9 @@ func BuildTopologyGraph(ctx context.Context, client *kubernetes.Clientset, names
 			})
 		}
 
-		// HPAs
-		hpas, _ := client.AutoscalingV2().HorizontalPodAutoscalers(ns).List(timeoutCtx, metav1.ListOptions{})
 		for _, h := range hpas.Items {
-			hpaID := "hpa:" + ns + ":" + h.Name
 			g.Nodes = append(g.Nodes, GraphNode{
-				ID:        hpaID,
+				ID:        "hpa:" + ns + ":" + h.Name,
 				Kind:      "HPA",
 				Name:      h.Name,
 				Namespace: ns,
@@ -173,12 +193,65 @@ func BuildTopologyGraph(ctx context.Context, client *kubernetes.Clientset, names
 			})
 		}
 
-		// Edges simples: Service -> Pod (por selector), Deployment -> ReplicaSet -> Pod, StatefulSet -> Pod, HPA -> Deployment/StatefulSet.
 		buildEdgesForNamespace(g, ns, deps, stsList, dsList, rsList, pods, svcs, hpas)
 	}
 
-	return g, nil
+	log.Printf(
+		"[TOPOLOGY] nodes=%d edges=%d",
+		len(g.Nodes),
+		len(g.Edges),
+	)
+
+	/*
+	========================
+	 ADAPTER → REACT FLOW
+	========================
+	*/
+
+	rfNodes := []RFNode{}
+	x := 0.0
+	y := 0.0
+
+	for _, n := range g.Nodes {
+		rfNodes = append(rfNodes, RFNode{
+			ID:   n.ID,
+			Type: "default",
+			Position: map[string]float64{
+				"x": x,
+				"y": y,
+			},
+			Data: map[string]interface{}{
+				"label": n.Kind + ": " + n.Name,
+			},
+		})
+
+		y += 120
+		if y > 800 {
+			y = 0
+			x += 260
+		}
+	}
+
+	rfEdges := []RFEdge{}
+	for _, e := range g.Edges {
+		rfEdges = append(rfEdges, RFEdge{
+			ID:     e.ID,
+			Source: e.Source,
+			Target: e.Target,
+		})
+	}
+
+	return &RFGraph{
+		Nodes: rfNodes,
+		Edges: rfEdges,
+	}, nil
 }
+
+/*
+========================
+ HELPERS
+========================
+*/
 
 func buildEdgesForNamespace(
 	g *ClusterGraph,
@@ -252,21 +325,21 @@ func buildEdgesForNamespace(
 		}
 	}
 
-	// HPA -> Deployment/StatefulSet
+	// HPA -> Workload
 	for _, h := range hpas.Items {
-		targetRef := h.Spec.ScaleTargetRef
-		switch targetRef.Kind {
+		ref := h.Spec.ScaleTargetRef
+		switch ref.Kind {
 		case "Deployment":
 			g.Edges = append(g.Edges, GraphEdge{
-				ID:     "edge:hpa->deploy:" + ns + ":" + h.Name + "->" + targetRef.Name,
+				ID:     "edge:hpa->deploy:" + ns + ":" + h.Name + "->" + ref.Name,
 				Source: "hpa:" + ns + ":" + h.Name,
-				Target: "deploy:" + ns + ":" + targetRef.Name,
+				Target: "deploy:" + ns + ":" + ref.Name,
 			})
 		case "StatefulSet":
 			g.Edges = append(g.Edges, GraphEdge{
-				ID:     "edge:hpa->sts:" + ns + ":" + h.Name + "->" + targetRef.Name,
+				ID:     "edge:hpa->sts:" + ns + ":" + h.Name + "->" + ref.Name,
 				Source: "hpa:" + ns + ":" + h.Name,
-				Target: "sts:" + ns + ":" + targetRef.Name,
+				Target: "sts:" + ns + ":" + ref.Name,
 			})
 		}
 	}
@@ -292,4 +365,3 @@ func ownerRefMatches(refs []metav1.OwnerReference, kind, name string) bool {
 	}
 	return false
 }
-

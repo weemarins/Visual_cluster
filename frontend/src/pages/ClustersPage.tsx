@@ -33,6 +33,19 @@ const ClustersPage: React.FC = () => {
     }
   };
 
+  const handleDelete = async (id: number) => {
+    const ok = window.confirm('Deseja remover este cluster?');
+    if (!ok) return;
+
+    try {
+      await apiClient.delete(`/clusters/${id}`);
+      setClusters(prev => prev.filter(c => c.id !== id));
+    } catch {
+      setError('Erro ao remover cluster');
+    }
+  };
+
+
   useEffect(() => {
     void fetchClusters();
   }, []);
@@ -101,14 +114,38 @@ const ClustersPage: React.FC = () => {
             {clusters.map(c => (
               <li
                 key={c.id}
-                className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-2 hover:border-sky-500/60 cursor-pointer"
-                onClick={() => navigate(`/topology/${c.id}`)}
+                className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-2 hover:border-sky-500/60"
               >
-                <div>
+                <div
+                  className="cursor-pointer"
+                  onClick={() => navigate(`/topology/${c.id}`)}
+                >
                   <p className="text-sm text-slate-50">{c.name}</p>
-                  {c.description && <p className="text-xs text-slate-400">{c.description}</p>}
+                  {c.description && (
+                    <p className="text-xs text-slate-400">{c.description}</p>
+                  )}
                 </div>
-                <span className="text-[10px] text-slate-500">Ver topologia</span>
+
+                <div className="flex items-center gap-3">
+                  <span
+                    className="text-[10px] text-slate-500 cursor-pointer"
+                    onClick={() => navigate(`/topology/${c.id}`)}
+                  >
+                    Ver topologia
+                  </span>
+
+                  {role === 'admin' && (
+                    <button
+                      onClick={e => {
+                        e.stopPropagation();
+                        handleDelete(c.id);
+                      }}
+                      className="text-xs text-red-400 hover:text-red-300"
+                    >
+                      Remover
+                    </button>
+                  )}
+                </div>
               </li>
             ))}
           </ul>
