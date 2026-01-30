@@ -28,7 +28,7 @@ spec:
       serviceAccountName: vkube-backend
       containers:
         - name: backend
-          image: ghcr.io/example/vkube-backend:latest
+          image: ghcr.io/weemarins/vkube-backend:latest
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
