@@ -9,7 +9,7 @@ import ReactFlow, {
   useNodesState,
   useEdgesState,
   Position
-} from 'react-flow-renderer';
+} from 'reactflow';
 import { apiClient } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
 

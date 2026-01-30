@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -38,6 +39,37 @@ func loginHandler(cfg *config.Config) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "payload inválido"})
 			return
 		}
+
+		// ---------- DEV MODE (bypass LDAP) ----------
+		if os.Getenv("APP_ENV") == "dev" {
+			// cria ou busca usuário DEV
+			var user models.User
+			result := db.DB.Where("username = ?", req.Username).First(&user)
+			if result.Error != nil {
+				user = models.User{
+					Username:    req.Username,
+					DisplayName: "Dev User",
+					Role:        "admin",
+			}
+			db.DB.Create(&user)
+		}
+
+		token, exp, err := auth.GenerateToken(user.Username, user.Role, cfg)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao gerar token"})
+			return
+		}
+
+		c.JSON(http.StatusOK, loginResponse{
+			Token:     token,
+			ExpiresAt: exp,
+			Username:  user.Username,
+			Role:      user.Role,
+		})
+		return
+	}
+	// ---------- FIM DEV MODE ----------
+
 
 		_, displayName, err := auth.LDAPAuthenticate(req.Username, req.Password, cfg)
 		if err != nil {
