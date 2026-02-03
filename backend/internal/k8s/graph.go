@@ -13,17 +13,13 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-/*
-========================
- MODELO DE DOMÍNIO (K8s)
-========================
-*/
-
+// --- MODELO DE DOMÍNIO ---
 type GraphNode struct {
 	ID        string            `json:"id"`
 	Kind      string            `json:"kind"`
 	Name      string            `json:"name"`
 	Namespace string            `json:"namespace,omitempty"`
+	Status    string            `json:"status,omitempty"`
 	Labels    map[string]string `json:"labels,omitempty"`
 }
 
@@ -38,12 +34,7 @@ type ClusterGraph struct {
 	Edges []GraphEdge `json:"edges"`
 }
 
-/*
-========================
- MODELO DE VISUALIZAÇÃO (React Flow)
-========================
-*/
-
+// --- MODELO REACT FLOW ---
 type RFNode struct {
 	ID       string                 `json:"id"`
 	Type     string                 `json:"type,omitempty"`
@@ -62,12 +53,7 @@ type RFGraph struct {
 	Edges []RFEdge `json:"edges"`
 }
 
-/*
-========================
- BUILD TOPOLOGY GRAPH
-========================
-*/
-
+// --- FUNÇÃO PRINCIPAL ---
 func BuildTopologyGraph(
 	ctx context.Context,
 	client *kubernetes.Clientset,
@@ -79,14 +65,12 @@ func BuildTopologyGraph(
 		Edges: []GraphEdge{},
 	}
 
-	// Timeout de segurança
 	timeoutCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 
 	var wg sync.WaitGroup
-	var mu sync.Mutex // Protege a escrita no grafo
+	var mu sync.Mutex
 
-	// Estruturas para armazenar os dados brutos (usado para criar as arestas depois)
 	var (
 		allDeps *appsv1.DeploymentList
 		allSts  *appsv1.StatefulSetList
@@ -97,19 +81,13 @@ func BuildTopologyGraph(
 		allHpas *autoscalingv2.HorizontalPodAutoscalerList
 	)
 
-	// Função auxiliar para tratamento de erro e filtro
 	listOpts := metav1.ListOptions{}
-	// Se tiver filtro de namespace específico, usamos ele. Se for "all" ou vazio, pegamos tudo ("").
 	targetNS := ""
 	if namespaceFilter != "all" && namespaceFilter != "" {
 		targetNS = namespaceFilter
 	}
 
-	// ---------------------------------------------------------
-	// 1. BUSCA PARALELA DE TODOS OS RECURSOS (CLUSTER-WIDE)
-	// ---------------------------------------------------------
-	// Isso faz apenas ~7 chamadas no total ao invés de N_namespaces * 7
-	
+	// 1. BUSCA PARALELA
 	wg.Add(7)
 
 	go func() {
@@ -119,7 +97,11 @@ func BuildTopologyGraph(
 			mu.Lock()
 			allDeps = list
 			for _, d := range list.Items {
-				g.Nodes = append(g.Nodes, GraphNode{ID: "deploy:" + d.Namespace + ":" + d.Name, Kind: "Deployment", Name: d.Name, Namespace: d.Namespace, Labels: d.Labels})
+				status := "Running"
+				if d.Status.ReadyReplicas < d.Status.Replicas {
+					status = "Warning"
+				}
+				g.Nodes = append(g.Nodes, GraphNode{ID: "deploy:" + d.Namespace + ":" + d.Name, Kind: "Deployment", Name: d.Name, Namespace: d.Namespace, Status: status, Labels: d.Labels})
 			}
 			mu.Unlock()
 		}
@@ -171,7 +153,18 @@ func BuildTopologyGraph(
 			mu.Lock()
 			allPods = list
 			for _, p := range list.Items {
-				g.Nodes = append(g.Nodes, GraphNode{ID: "pod:" + p.Namespace + ":" + p.Name, Kind: "Pod", Name: p.Name, Namespace: p.Namespace, Labels: p.Labels})
+				status := string(p.Status.Phase)
+				for _, c := range p.Status.ContainerStatuses {
+					if c.State.Waiting != nil {
+						status = c.State.Waiting.Reason
+						break
+					}
+					if c.State.Terminated != nil && c.State.Terminated.ExitCode != 0 {
+						status = "Error"
+						break
+					}
+				}
+				g.Nodes = append(g.Nodes, GraphNode{ID: "pod:" + p.Namespace + ":" + p.Name, Kind: "Pod", Name: p.Name, Namespace: p.Namespace, Status: status, Labels: p.Labels})
 			}
 			mu.Unlock()
 		}
@@ -203,7 +196,7 @@ func BuildTopologyGraph(
 		}
 	}()
 
-	// Nodes físicos e Namespaces (rápido)
+	// Nodes Físicos
 	go func() {
 		nodes, _ := client.CoreV1().Nodes().List(timeoutCtx, metav1.ListOptions{})
 		if nodes != nil {
@@ -217,14 +210,8 @@ func BuildTopologyGraph(
 
 	wg.Wait()
 
-	// ---------------------------------------------------------
 	// 2. CONSTRUÇÃO DE ARESTAS (EDGES)
-	// ---------------------------------------------------------
-	// Agora que temos tudo em memória, processamos as conexões.
-	// Precisamos iterar por namespace para não conectar recursos de namespaces diferentes.
-
-	// Agrupa recursos por namespace em mapas para acesso rápido
-	// Isso evita loops aninhados gigantescos O(N^2) global
+	
 	podsByNs := make(map[string][]corev1.Pod)
 	if allPods != nil {
 		for _, p := range allPods.Items {
@@ -239,7 +226,7 @@ func BuildTopologyGraph(
 		}
 	}
 
-	// Processa Edges
+	// Service -> Pod
 	if allSvcs != nil {
 		for _, svc := range allSvcs.Items {
 			nsPods := podsByNs[svc.Namespace]
@@ -255,11 +242,11 @@ func BuildTopologyGraph(
 		}
 	}
 
+	// Deployment -> RS -> Pod
 	if allDeps != nil {
 		for _, dep := range allDeps.Items {
 			nsRs := rsByNs[dep.Namespace]
 			nsPods := podsByNs[dep.Namespace]
-			
 			for _, rs := range nsRs {
 				if ownerRefMatches(rs.OwnerReferences, "Deployment", dep.Name) {
 					g.Edges = append(g.Edges, GraphEdge{
@@ -267,7 +254,6 @@ func BuildTopologyGraph(
 						Source: "deploy:" + dep.Namespace + ":" + dep.Name,
 						Target: "rs:" + dep.Namespace + ":" + rs.Name,
 					})
-					// RS -> Pod
 					for _, pod := range nsPods {
 						if ownerRefMatches(pod.OwnerReferences, "ReplicaSet", rs.Name) {
 							g.Edges = append(g.Edges, GraphEdge{
@@ -282,6 +268,7 @@ func BuildTopologyGraph(
 		}
 	}
 
+	// StatefulSet -> Pod
 	if allSts != nil {
 		for _, sts := range allSts.Items {
 			nsPods := podsByNs[sts.Namespace]
@@ -297,6 +284,7 @@ func BuildTopologyGraph(
 		}
 	}
 
+	// DaemonSet -> Pod
 	if allDs != nil {
 		for _, ds := range allDs.Items {
 			nsPods := podsByNs[ds.Namespace]
@@ -312,6 +300,7 @@ func BuildTopologyGraph(
 		}
 	}
 
+	// HPA -> Workload
 	if allHpas != nil {
 		for _, h := range allHpas.Items {
 			ref := h.Spec.ScaleTargetRef
@@ -334,18 +323,19 @@ func BuildTopologyGraph(
 
 	log.Printf("[TOPOLOGY] Completed. Nodes: %d, Edges: %d", len(g.Nodes), len(g.Edges))
 
-	// Conversão para React Flow
+	// Adapter para React Flow
 	rfNodes := []RFNode{}
 	x, y := 0.0, 0.0
 	for _, n := range g.Nodes {
 		rfNodes = append(rfNodes, RFNode{
 			ID:       n.ID,
-			Type:     "default",
+			Type:     "custom", // CORRIGIDO: Força 'custom' para usar o nó colorido
 			Position: map[string]float64{"x": x, "y": y},
 			Data: map[string]interface{}{
 				"label":     n.Kind + ": " + n.Name,
-				"namespace": n.Namespace, // Essencial
+				"namespace": n.Namespace,
 				"kind":      n.Kind,
+				"status":    n.Status,
 				"labels":    n.Labels,
 			},
 		})
@@ -362,16 +352,22 @@ func BuildTopologyGraph(
 
 // Helpers
 func podMatchesSelector(labels, selector map[string]string) bool {
-	if len(selector) == 0 { return false }
+	if len(selector) == 0 {
+		return false
+	}
 	for k, v := range selector {
-		if labels[k] != v { return false }
+		if labels[k] != v {
+			return false
+		}
 	}
 	return true
 }
 
 func ownerRefMatches(refs []metav1.OwnerReference, kind, name string) bool {
 	for _, r := range refs {
-		if r.Kind == kind && r.Name == name { return true }
+		if r.Kind == kind && r.Name == name {
+			return true
+		}
 	}
 	return false
 }

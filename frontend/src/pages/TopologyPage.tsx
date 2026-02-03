@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import ReactFlow, {
   Background,
@@ -13,122 +13,169 @@ import ReactFlow, {
   ReactFlowProvider,
   Handle
 } from 'reactflow';
+import dagre from 'dagre';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import Ansi from 'ansi-to-react';
 
 import 'reactflow/dist/style.css'; 
 import { apiClient } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
 
-// --- CONFIGURAÇÃO DE CORES POR TIPO ---
+// --- CONFIGURAÇÃO DE CORES ---
 const resourceColors: Record<string, { bg: string; border: string; text: string }> = {
-  Pod:           { bg: '#022c22', border: '#10b981', text: '#34d399' }, // Emerald (Verde)
-  Deployment:    { bg: '#0f172a', border: '#3b82f6', text: '#60a5fa' }, // Blue (Azul)
-  Service:       { bg: '#2a1205', border: '#f97316', text: '#fb923c' }, // Orange (Laranja)
-  StatefulSet:   { bg: '#1e1b4b', border: '#8b5cf6', text: '#a78bfa' }, // Violet (Roxo)
-  DaemonSet:     { bg: '#370b18', border: '#ec4899', text: '#f472b6' }, // Pink (Rosa)
-  ReplicaSet:    { bg: '#171717', border: '#525252', text: '#a3a3a3' }, // Neutral (Cinza)
-  HPA:           { bg: '#2e1065', border: '#c084fc', text: '#e879f9' }, // Purple (Lilás)
-  Node:          { bg: '#172554', border: '#1d4ed8', text: '#bfdbfe' }, // Blue Dark
-  // Fallback (Padrão)
+  Pod:           { bg: '#022c22', border: '#10b981', text: '#34d399' },
+  Deployment:    { bg: '#0f172a', border: '#3b82f6', text: '#60a5fa' },
+  Service:       { bg: '#2a1205', border: '#f97316', text: '#fb923c' },
+  StatefulSet:   { bg: '#1e1b4b', border: '#8b5cf6', text: '#a78bfa' },
+  DaemonSet:     { bg: '#370b18', border: '#ec4899', text: '#f472b6' },
+  ReplicaSet:    { bg: '#171717', border: '#525252', text: '#a3a3a3' },
+  HPA:           { bg: '#2e1065', border: '#c084fc', text: '#e879f9' },
+  Node:          { bg: '#172554', border: '#1d4ed8', text: '#bfdbfe' },
   default:       { bg: '#020617', border: '#334155', text: '#e2e8f0' },
 };
 
-// --- 1. COMPONENTES AUXILIARES DA SIDEBAR ---
+const getStatusColor = (status: string) => {
+    if (!status) return 'transparent';
+    if (status === 'Running' || status === 'Succeeded' || status === 'Ready') return '#10b981';
+    if (status === 'Pending' || status === 'ContainerCreating' || status === 'Warning') return '#f59e0b';
+    if (status === 'Failed' || status === 'Error' || status.includes('Crash') || status.includes('Image')) return '#ef4444';
+    return '#6366f1';
+};
 
-// Helper para extrair dados do ID (ex: "pod:default:nginx-123" -> kind, ns, name)
+// --- LAYOUT ENGINE (DAGRE - PAISAGEM FORÇADA) ---
+const getLayoutedElements = (nodes: Node[], edges: Edge[]) => {
+    const dagreGraph = new dagre.graphlib.Graph();
+    dagreGraph.setDefaultEdgeLabel(() => ({}));
+
+    // 'LR' = Left to Right (Paisagem)
+    // ranksep = Distância entre colunas
+    // nodesep = Distância entre nós na mesma coluna
+    dagreGraph.setGraph({ rankdir: 'LR', ranksep: 180, nodesep: 60 });
+
+    nodes.forEach((node) => {
+        // Largura/Altura do Card
+        dagreGraph.setNode(node.id, { width: 220, height: 80 });
+    });
+
+    edges.forEach((edge) => {
+        dagreGraph.setEdge(edge.source, edge.target);
+    });
+
+    dagre.layout(dagreGraph);
+
+    const layoutedNodes = nodes.map((node) => {
+        const nodeWithPosition = dagreGraph.node(node.id);
+        
+        // Fallback de segurança
+        if (!nodeWithPosition) return node;
+
+        return {
+            ...node,
+            // --- AQUI ESTÁ A CORREÇÃO CRÍTICA ---
+            // Forçamos o React Flow a usar conectores laterais, alinhando com o 'LR' do Dagre
+            targetPosition: Position.Left,
+            sourcePosition: Position.Right,
+            position: {
+                x: nodeWithPosition.x - 110, // Ajuste para centralizar (metade da largura)
+                y: nodeWithPosition.y - 40,  // Ajuste para centralizar (metade da altura)
+            },
+        };
+    });
+
+    return { nodes: layoutedNodes, edges };
+};
+
+// --- HELPER PARSERS ---
 const parseNodeId = (id: string) => {
   const parts = id.split(':');
-  // Formato esperado: kind:namespace:name (ex: pod:default:app)
-  if (parts.length === 3) {
-    return { kind: parts[0], namespace: parts[1], name: parts[2] };
-  }
-  // Formato global: kind:name (ex: node:worker-1)
-  if (parts.length === 2) {
-    return { kind: parts[0], namespace: '', name: parts[1] };
-  }
+  if (parts.length === 3) return { kind: parts[0], namespace: parts[1], name: parts[2] };
+  if (parts.length === 2) return { kind: parts[0], namespace: '', name: parts[1] };
   return { kind: 'unknown', namespace: '', name: id };
 };
 
+// --- COMPONENTES AUXILIARES ---
+
 const YamlViewer = ({ clusterId, nodeId }: { clusterId: string, nodeId: string }) => {
   const [content, setContent] = useState('Carregando YAML...');
-  
   useEffect(() => {
     const { kind, namespace, name } = parseNodeId(nodeId);
-    
-    // Capitaliza o Kind (pod -> Pod) para o K8s entender, se necessário
     const kindCap = kind.charAt(0).toUpperCase() + kind.slice(1);
-
-    apiClient.get(`/clusters/${clusterId}/resources/yaml`, {
-      params: { kind: kindCap, namespace, name }
-    })
+    apiClient.get(`/clusters/${clusterId}/resources/yaml`, { params: { kind: kindCap, namespace, name } })
     .then(res => setContent(res.data))
-    .catch(err => {
-      console.error(err);
-      setContent(`Erro ao carregar YAML.\n${err.response?.data?.error || err.message}`);
-    });
+    .catch(err => setContent(`Erro: ${err.message}`));
   }, [clusterId, nodeId]);
 
   return (
-    <pre className="text-[10px] font-mono text-green-300 bg-slate-950 p-3 rounded border border-slate-800 overflow-auto h-full whitespace-pre-wrap">
-      {content}
-    </pre>
+    <div className="h-full overflow-auto text-[10px] bg-[#020617]">
+        <SyntaxHighlighter language="yaml" style={vscDarkPlus} customStyle={{ margin: 0, height: '100%', background: 'transparent' }}>
+            {content}
+        </SyntaxHighlighter>
+    </div>
   );
 };
 
 const LogViewer = ({ clusterId, nodeId }: { clusterId: string, nodeId: string }) => {
   const [logs, setLogs] = useState<string[]>([]);
   const [status, setStatus] = useState('Conectando...');
+  const [follow, setFollow] = useState(true);
+  const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const { kind, namespace, name } = parseNodeId(nodeId);
-
-    // Logs só fazem sentido para Pods (geralmente)
     if (kind.toLowerCase() !== 'pod') {
-      setLogs(['Logs estão disponíveis apenas para Pods.']);
-      setStatus('');
+      setLogs(['Logs apenas disponíveis para Pods.']);
       return;
     }
-
-    setLogs([]);
-    setStatus('Buscando logs...');
-
     const fetchLogs = () => {
-      apiClient.get(`/clusters/${clusterId}/resources/logs`, {
-        params: { namespace, name, tail: 50 }
-      })
+      apiClient.get(`/clusters/${clusterId}/resources/logs`, { params: { namespace, name, tail: 200 } })
       .then(res => {
         setLogs(res.data.lines || []);
-        setStatus('Atualizado em ' + new Date().toLocaleTimeString());
+        setStatus('Sync: ' + new Date().toLocaleTimeString());
       })
-      .catch(err => {
-        setStatus('Erro ao buscar logs.');
-        setLogs([err.response?.data?.error || 'Falha na conexão']);
-      });
+      .catch(() => setStatus('Erro na conexão'));
     };
-
     fetchLogs();
-    const interval = setInterval(fetchLogs, 4000); // Atualiza a cada 4s
+    const interval = setInterval(fetchLogs, 3000);
     return () => clearInterval(interval);
-
   }, [clusterId, nodeId]);
 
+  // Auto-scroll
+  useEffect(() => {
+    if (follow && bottomRef.current) {
+        bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs, follow]);
+
   return (
-    <div className="flex flex-col h-full">
-      <div className="bg-black text-slate-300 font-mono text-[10px] p-3 flex-1 overflow-y-auto rounded border border-slate-800">
-        {logs.length === 0 && <span className="text-slate-500 italic">Nenhum log encontrado ou carregando...</span>}
-        {logs.map((line, i) => (
-          <div key={i} className="border-b border-slate-900/50 py-0.5 break-all hover:bg-slate-900">{line}</div>
-        ))}
+    <div className="flex flex-col h-full bg-[#0d1117] rounded border border-slate-800 font-mono">
+      {/* Toolbar */}
+      <div className="flex justify-between items-center px-3 py-1 bg-slate-900 border-b border-slate-800">
+        <span className="text-[10px] text-slate-400">Terminal Output</span>
+        <label className="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={follow} onChange={e => setFollow(e.target.checked)} className="rounded bg-slate-800 border-slate-600 text-sky-500 focus:ring-0 w-3 h-3" />
+            <span className={`text-[10px] ${follow ? 'text-sky-400 font-bold' : 'text-slate-500'}`}>Auto-Follow</span>
+        </label>
       </div>
-      <div className="text-[9px] text-slate-500 text-right mt-1">{status}</div>
+      
+      {/* Log Area */}
+      <div className="flex-1 overflow-y-auto p-3 text-[10px] leading-relaxed text-slate-300">
+        {logs.map((line, i) => (
+          <div key={i} className="whitespace-pre-wrap break-all border-b border-slate-800/30 pb-0.5 mb-0.5 hover:bg-slate-800/50">
+             <Ansi>{line}</Ansi>
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+      <div className="text-[9px] text-slate-500 text-right p-1 bg-slate-950">{status}</div>
     </div>
   );
 };
 
-// --- 2. NÓ CUSTOMIZADO (ATUALIZADO COM CORES) ---
+// --- NÓ CUSTOMIZADO (HOVER + CORES) ---
 const ResourceNode = ({ data }: any) => {
   const isGroup = data.isGroup;
   
-  // MODO GRUPO (NAMESPACE)
   if (isGroup) {
     return (
       <div style={{ 
@@ -136,161 +183,121 @@ const ResourceNode = ({ data }: any) => {
         border: '2px solid #6366f1', borderRadius: '12px', padding: '20px', 
         width: '280px', height: '140px', color: 'white', display: 'flex', 
         flexDirection: 'column', alignItems: 'center', justifyContent: 'center', 
-        boxShadow: '0 10px 25px -5px rgba(99, 102, 241, 0.4)', cursor: 'pointer',
-        transition: 'transform 0.2s'
-      }} className="hover:scale-105">
+        boxShadow: '0 10px 25px -5px rgba(99, 102, 241, 0.4)', cursor: 'pointer'
+      }} className="hover:scale-105 transition-transform group relative">
         <div style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '8px' }}>{data.label}</div>
-        <div style={{ fontSize: '12px', color: '#a5b4fc', background: '#312e81', padding: '4px 10px', borderRadius: '20px' }}>
-            Clique para entrar
-        </div>
+        <div style={{ fontSize: '12px', color: '#a5b4fc', background: '#312e81', padding: '4px 10px', borderRadius: '20px' }}>Clique para entrar</div>
         <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
-        <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
       </div>
     );
   }
 
-  // MODO RECURSO (POD, DEPLOYMENT, ETC)
   const kind = data.kind || 'default';
   const style = resourceColors[kind] || resourceColors.default;
+  const statusColor = getStatusColor(data.status);
 
   return (
-    <div style={{ 
-      background: style.bg, 
-      border: `1px solid ${style.border}`, 
-      borderRadius: '8px', 
-      padding: '8px 10px', 
-      width: '160px', 
-      color: '#e2e8f0', 
-      textAlign: 'center', 
-      fontSize: '11px', 
-      boxShadow: `0 4px 6px -1px rgba(0,0,0,0.5), 0 0 15px -5px ${style.border}40`,
-      position: 'relative',
-      transition: 'all 0.2s'
-    }} className="hover:brightness-110">
-      
-      {/* Handle de Entrada colorido */}
-      <Handle 
-        type="target" 
-        position={Position.Left} 
-        style={{ background: style.border, width: '8px', height: '8px', border: 'none' }} 
-      />
-      
-      {/* Título do Nó */}
-      <div style={{ 
-        fontWeight: '700', 
-        marginBottom: '4px', 
-        overflow: 'hidden', 
-        textOverflow: 'ellipsis', 
-        whiteSpace: 'nowrap',
-        color: style.text 
-      }}>
-        {/* Remove prefixo visualmente se houver (ex pod:nome -> nome) */}
-        {data.label.includes(':') ? data.label.split(':')[1] : data.label}
-      </div>
-      
-      {/* Badge do Tipo */}
-      <div style={{ 
-        display: 'inline-block',
-        fontSize: '9px', 
-        color: style.text, 
-        background: 'rgba(0,0,0,0.3)',
-        padding: '2px 6px',
-        borderRadius: '4px',
-        fontFamily: 'monospace'
-      }}>
-        {kind.toUpperCase()}
-      </div>
+    <div className="group relative">
+        {/* Card Principal */}
+        <div style={{ 
+            background: style.bg, 
+            border: `1px solid ${data.status && data.status !== 'Running' && data.status !== 'Ready' ? statusColor : style.border}`, 
+            borderRadius: '6px', padding: '6px 10px', width: '200px', 
+            color: '#e2e8f0', textAlign: 'center', fontSize: '11px', 
+            boxShadow: `0 4px 6px -1px rgba(0,0,0,0.5)`,
+            transition: 'all 0.2s'
+        }} className="hover:brightness-125 hover:shadow-lg hover:shadow-sky-900/20">
+        
+        {/* Status Dot */}
+        {data.status && (
+            <div style={{
+                position: 'absolute', top: '-3px', right: '-3px', width: '8px', height: '8px',
+                borderRadius: '50%', backgroundColor: statusColor, border: '1px solid #0f172a',
+                boxShadow: statusColor === '#ef4444' ? '0 0 5px #ef4444' : 'none'
+            }} />
+        )}
 
-      {/* Handle de Saída colorido */}
-      <Handle 
-        type="source" 
-        position={Position.Right} 
-        style={{ background: style.border, width: '8px', height: '8px', border: 'none' }} 
-      />
+        <Handle type="target" position={Position.Left} style={{ background: style.border, width: '6px', height: '6px', border: 'none' }} />
+        
+        <div style={{ fontWeight: '700', marginBottom: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: style.text }}>
+            {data.label.includes(':') ? data.label.split(':')[1] : data.label}
+        </div>
+        
+        <div className="flex justify-center gap-2 items-center mt-1">
+            <span style={{ fontSize: '9px', color: style.text, background: 'rgba(0,0,0,0.3)', padding: '1px 5px', borderRadius: '3px', fontFamily: 'monospace' }}>
+                {kind.toUpperCase()}
+            </span>
+            {data.status && data.status !== 'Running' && (
+                <span style={{ fontSize: '8px', color: statusColor, fontWeight: 'bold' }}>{data.status}</span>
+            )}
+        </div>
+
+        <Handle type="source" position={Position.Right} style={{ background: style.border, width: '6px', height: '6px', border: 'none' }} />
+        </div>
+
+        {/* TOOLTIP FLUTUANTE (HOVER) */}
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 bg-slate-900 border border-slate-700 rounded-md shadow-xl p-3 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
+            <div className="text-[10px] text-slate-400 mb-1">Detalhes do Recurso</div>
+            <div className="text-xs font-bold text-white mb-2 break-all">{data.label}</div>
+            <div className="grid grid-cols-2 gap-2 text-[10px]">
+                <div>
+                    <span className="block text-slate-500">Status</span>
+                    <span style={{ color: statusColor }}>{data.status || 'Unknown'}</span>
+                </div>
+                <div>
+                    <span className="block text-slate-500">Namespace</span>
+                    <span className="text-slate-300">{data.namespace}</span>
+                </div>
+                <div>
+                    <span className="block text-slate-500">Kind</span>
+                    <span className="text-slate-300">{kind}</span>
+                </div>
+            </div>
+            {/* Seta do tooltip */}
+            <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1 border-4 border-transparent border-t-slate-700"></div>
+        </div>
     </div>
   );
 };
 
 // --- Tipagens ---
 type GraphNode = {
-  id: string;
-  type: string;
-  position: { x: number; y: number };
-  data: {
-    label: string;
-    namespace?: string;
-    kind?: string; // Adicionado para suportar cores
-    labels?: Record<string, string>;
-    isGroup?: boolean;
-    count?: number;
-    originalNamespace?: string;
-    id_short?: string;
-  };
+  id: string; type: string; position: { x: number; y: number };
+  data: { label: string; namespace?: string; kind?: string; status?: string; labels?: Record<string, string>; isGroup?: boolean; count?: number; originalNamespace?: string; id_short?: string; };
 };
-
-type GraphEdge = {
-  id: string;
-  source: string;
-  target: string;
-};
-
-type ClusterGraph = {
-  nodes: GraphNode[];
-  edges: GraphEdge[];
-};
+type GraphEdge = { id: string; source: string; target: string; };
+type ClusterGraph = { nodes: GraphNode[]; edges: GraphEdge[]; };
 
 const POLL_INTERVAL_MS = 15000;
 
-// --- Componente React Flow Interno ---
+// --- Componente React Flow ---
 const TopologyContent: React.FC<{
-  nodes: Node[];
-  edges: Edge[];
-  onNodesChange: any;
-  onEdgesChange: any;
-  onNodeClick: any;
-  nodeTypes: any;
+  nodes: Node[]; edges: Edge[]; onNodesChange: any; onEdgesChange: any; onNodeClick: any; nodeTypes: any;
 }> = ({ nodes, edges, onNodesChange, onEdgesChange, onNodeClick, nodeTypes }) => {
   const { fitView } = useReactFlow();
-
+  
+  // Fit View inicial suave
   useEffect(() => {
-    if (nodes.length > 0) {
-        setTimeout(() => {
-            fitView({ padding: 0.15, duration: 800 });
-        }, 100);
-    }
+    if (nodes.length > 0) setTimeout(() => fitView({ padding: 0.1, duration: 800 }), 100);
   }, [nodes.length, fitView]);
 
   return (
     <ReactFlow
-      nodes={nodes}
-      edges={edges}
-      onNodesChange={onNodesChange}
-      onEdgesChange={onEdgesChange}
-      onNodeClick={onNodeClick}
-      nodeTypes={nodeTypes}
-      minZoom={0.02}
-      maxZoom={3}
-      onlyRenderVisibleElements={true} 
-      defaultEdgeOptions={{ type: 'smoothstep', animated: false }}
+      nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onNodeClick={onNodeClick} nodeTypes={nodeTypes}
+      minZoom={0.05} maxZoom={2} onlyRenderVisibleElements={true} defaultEdgeOptions={{ type: 'smoothstep', animated: true, style: { stroke: '#475569', strokeWidth: 1.5 } }}
       style={{ width: '100%', height: '100%', background: '#0f172a' }}
     >
       <MiniMap 
-        nodeColor={(n) => {
-           if (n.data.isGroup) return '#6366f1';
-           // Minimap colorido também!
-           const kind = n.data.kind || 'default';
-           return resourceColors[kind]?.border || '#334155';
-        }} 
-        maskColor="#020617ee" 
-        style={{ backgroundColor: '#0f172a' }}
+        nodeColor={(n) => n.data.isGroup ? '#6366f1' : (resourceColors[n.data.kind || 'default']?.border || '#334155')} 
+        maskColor="#020617ee" style={{ backgroundColor: '#0f172a' }} 
       />
-      <Controls style={{ backgroundColor: '#1e293b', border: '1px solid #334155', padding: '2px' }} />
-      <Background color="#1e293b" gap={40} size={1} />
+      <Controls style={{ backgroundColor: '#1e293b', border: '1px solid #334155' }} />
+      <Background color="#1e293b" gap={30} size={1} />
     </ReactFlow>
   );
 };
 
-// --- Página Principal ---
+// --- PÁGINA PRINCIPAL ---
 const TopologyPage: React.FC = () => {
   const { clusterId } = useParams<{ clusterId: string }>();
   const navigate = useNavigate();
@@ -300,283 +307,160 @@ const TopologyPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [expandedNamespace, setExpandedNamespace] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
-  const [hasMultipleNamespaces, setHasMultipleNamespaces] = useState(true);
-  
-  // Estado para controlar as abas da Sidebar
   const [activeTab, setActiveTab] = useState<'info' | 'yaml' | 'logs'>('info');
+  const [searchTerm, setSearchTerm] = useState('');
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
 
   const nodeTypes = useMemo(() => ({ custom: ResourceNode }), []);
 
-  const computeLayout = useCallback((nodesToLayout: any[], edgesToLayout: any[], isGroupMode: boolean) => {
-    const count = nodesToLayout.length;
-    if (count === 0) return { nodes: [], edges: [] };
-
-    const COLS = Math.ceil(Math.sqrt(count * (isGroupMode ? 2 : 1.8))) || 4;
-    const X_GAP = isGroupMode ? 320 : 200;
-    const Y_GAP = isGroupMode ? 180 : 100;
-
-    const layoutNodes = nodesToLayout.map((n, index) => {
-      const col = index % COLS;
-      const row = Math.floor(index / COLS);
-      
-      return {
-        id: n.id,
-        type: 'custom',
-        data: { 
-            ...n.data, 
-            id_short: n.id.length > 25 ? n.id.substring(0, 22) + '...' : n.id 
-        },
-        position: { x: col * X_GAP, y: row * Y_GAP },
-        sourcePosition: Position.Right,
-        targetPosition: Position.Left,
-      };
-    });
-
-    return { nodes: layoutNodes, edges: edgesToLayout };
-  }, []);
-
   const processView = useCallback(() => {
     if (!fullGraph || !fullGraph.nodes) return;
 
-    const groups: Record<string, number> = {};
-    fullGraph.nodes.forEach(n => {
-      const ns = n.data.namespace || '_global_';
-      groups[ns] = (groups[ns] || 0) + 1;
-    });
+    let currentNodes = fullGraph.nodes;
+    let currentEdges = fullGraph.edges;
+    
+    // VISÃO DE GRUPOS
+    if (expandedNamespace === null) {
+        const groups: Record<string, number> = {};
+        fullGraph.nodes.forEach(n => {
+            const ns = n.data.namespace || '_global_';
+            groups[ns] = (groups[ns] || 0) + 1;
+        });
 
-    const uniqueNamespaces = Object.keys(groups);
-
-    if (uniqueNamespaces.length === 1 && expandedNamespace === null) {
-        setHasMultipleNamespaces(false);
-        setExpandedNamespace(uniqueNamespaces[0]);
+        const groupNodes = Object.entries(groups)
+            .filter(([ns]) => ns.toLowerCase().includes(searchTerm.toLowerCase()))
+            .map(([ns, count], idx) => ({
+                id: `ns-${ns}`, type: 'custom',
+                data: { label: ns, count, isGroup: true, originalNamespace: ns },
+                // Layout de Grid simples para grupos
+                position: { x: (idx % 4) * 320, y: Math.floor(idx / 4) * 180 }
+            }));
+        
+        setNodes(groupNodes);
+        setEdges([]);
         return;
     }
 
-    if (uniqueNamespaces.length > 1) setHasMultipleNamespaces(true);
-
-    if (expandedNamespace === null) {
-      const groupNodes = Object.entries(groups).map(([ns, count]) => ({
-        id: `ns-${ns}`,
-        type: 'custom',
-        data: { 
-            label: ns === '_global_' ? 'Recursos Globais' : ns, 
-            count, 
-            isGroup: true, 
-            originalNamespace: ns 
-        },
-        position: { x: 0, y: 0 }
-      }));
-      
-      const { nodes: lNodes } = computeLayout(groupNodes, [], true);
-      setNodes(lNodes);
-      setEdges([]); 
+    // VISÃO DE DETALHE
+    currentNodes = currentNodes.filter(n => (n.data.namespace || '_global_') === expandedNamespace);
     
-    } else {
-      const filteredNodes = fullGraph.nodes.filter(n => {
-        const ns = n.data.namespace || '_global_';
-        return ns === expandedNamespace;
-      });
+    // Forçar o tipo 'custom' para aplicar as cores e tooltip
+    currentNodes = currentNodes.map(node => ({
+        ...node,
+        type: 'custom',
+        data: {
+             ...node.data,
+             status: node.data.status || 'Unknown'
+        }
+    }));
 
-      const nodeIds = new Set(filteredNodes.map(n => n.id));
-      const filteredEdges = fullGraph.edges.filter(e => 
-        nodeIds.has(e.source) && nodeIds.has(e.target)
-      ).map(e => ({
-          ...e,
-          style: { stroke: '#38bdf8', opacity: 0.3 }
-      }));
-
-      const { nodes: lNodes, edges: lEdges } = computeLayout(filteredNodes, filteredEdges, false);
-      setNodes(lNodes);
-      setEdges(lEdges);
+    if (searchTerm) {
+        currentNodes = currentNodes.filter(n => n.data.label.toLowerCase().includes(searchTerm.toLowerCase()));
     }
-  }, [fullGraph, expandedNamespace, computeLayout, setNodes, setEdges]);
 
-  useEffect(() => {
-    processView();
-  }, [processView]);
+    const nodeIds = new Set(currentNodes.map(n => n.id));
+    currentEdges = fullGraph.edges.filter(e => nodeIds.has(e.source) && nodeIds.has(e.target));
+
+    // LAYOUT DAGRE (Horizontal)
+    const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(currentNodes, currentEdges);
+
+    setNodes(layoutedNodes);
+    setEdges(layoutedEdges);
+
+  }, [fullGraph, expandedNamespace, searchTerm, setNodes, setEdges]);
+
+  useEffect(() => { processView(); }, [processView]);
 
   const fetchGraph = async (isBackground = false) => {
     if (!clusterId) return;
     if (!isBackground) setLoading(true);
-    
     try {
-      const res = await apiClient.get<ClusterGraph>(`/topology/${clusterId}`, {
-        params: { namespace: 'all' }
-      });
-      if (res.data?.nodes) {
-          setFullGraph(res.data);
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      if (!isBackground) setLoading(false);
-    }
+      const res = await apiClient.get<ClusterGraph>(`/topology/${clusterId}`, { params: { namespace: 'all' } });
+      if (res.data?.nodes) setFullGraph(res.data);
+    } catch (err) { console.error(err); } 
+    finally { if (!isBackground) setLoading(false); }
   };
 
-  useEffect(() => {
-    void fetchGraph(false);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clusterId]);
-
-  useEffect(() => {
-    const id = setInterval(() => void fetchGraph(true), POLL_INTERVAL_MS);
-    return () => clearInterval(id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clusterId]);
+  useEffect(() => { void fetchGraph(false); }, [clusterId]);
+  useEffect(() => { const id = setInterval(() => void fetchGraph(true), POLL_INTERVAL_MS); return () => clearInterval(id); }, [clusterId]);
 
   const handleNodeClick = (_: React.MouseEvent, node: Node) => {
     if (node.data.isGroup) {
       setExpandedNamespace(node.data.originalNamespace);
       setSelectedNode(null);
+      setSearchTerm('');
     } else {
       const originalNode = fullGraph?.nodes.find(n => n.id === node.id);
-      if (originalNode) {
-          setSelectedNode(originalNode);
-          setActiveTab('info'); // Reseta a aba ao abrir novo nó
-      }
+      if (originalNode) { setSelectedNode(originalNode); setActiveTab('info'); }
     }
-  };
-
-  const handleBackToOverview = () => {
-    setExpandedNamespace(null);
-    setSelectedNode(null);
   };
 
   return (
     <div className="h-screen w-screen bg-slate-950 flex flex-col overflow-hidden relative">
       <header className="h-14 flex-none flex items-center justify-between px-6 border-b border-slate-800 bg-slate-900 z-50 shadow-md">
-        <div className="flex items-center gap-4">
-          <button onClick={() => navigate('/clusters')} className="text-xs px-3 py-1.5 rounded-full border border-slate-600 text-slate-300 hover:bg-slate-800 transition-colors">
-            &larr; Voltar
-          </button>
-          
+        <div className="flex items-center gap-4 flex-1">
+          <button onClick={() => navigate('/clusters')} className="text-xs px-3 py-1.5 rounded-full border border-slate-600 text-slate-300 hover:bg-slate-800">&larr; Voltar</button>
           <div className="h-5 w-px bg-slate-700 mx-1" />
-
-          <h1 className="text-sm font-medium text-slate-200 flex items-center gap-2">
+          <h1 className="text-sm font-medium text-slate-200 flex items-center gap-2 whitespace-nowrap">
             {expandedNamespace ? (
                <>
-                 {hasMultipleNamespaces && (
-                     <>
-                        <span onClick={handleBackToOverview} className="cursor-pointer text-slate-400 hover:text-white transition-colors">Namespaces</span>
-                        <span className="text-slate-600">/</span>
-                     </>
-                 )}
-                 <span className="text-sky-400 font-semibold">{expandedNamespace === '_global_' ? 'Recursos Globais' : expandedNamespace}</span>
-                 <span className="ml-2 text-xs bg-slate-800 px-2 py-0.5 rounded text-slate-400">
-                    {nodes.length} nós
-                 </span>
+                 <span onClick={() => { setExpandedNamespace(null); setSelectedNode(null); }} className="cursor-pointer text-slate-400 hover:text-white">Namespaces</span>
+                 <span className="text-slate-600">/</span>
+                 <span className="text-sky-400 font-semibold">{expandedNamespace}</span>
                </>
-            ) : 'Visão Geral dos Namespaces'}
+            ) : 'Visão Geral'}
           </h1>
+          <div className="ml-8 relative max-w-md w-full">
+              <input type="text" placeholder="Buscar recursos..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 rounded-full py-1.5 px-4 text-xs text-white focus:outline-none focus:border-sky-500 transition-colors" />
+          </div>
         </div>
         <button onClick={logout} className="text-xs text-slate-400 hover:text-white">Sair</button>
       </header>
 
       <main className="flex-1 relative w-full h-full">
-        <div className="absolute inset-0 z-0">
-            {loading && (
-                <div className="absolute inset-0 flex items-center justify-center z-50 bg-slate-950/60 backdrop-blur-sm">
-                   <div className="flex items-center gap-3 bg-slate-900 px-6 py-3 rounded-full border border-sky-500/30 shadow-xl">
-                      <span className="w-2 h-2 bg-sky-500 rounded-full animate-pulse"/>
-                      <span className="text-sm text-sky-400">Carregando topologia...</span>
-                   </div>
-                </div>
-            )}
+        {loading && <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm"><span className="text-sky-400 animate-pulse font-mono">Carregando Topologia...</span></div>}
+        
+        <ReactFlowProvider>
+            <TopologyContent nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onNodeClick={handleNodeClick} nodeTypes={nodeTypes} />
+        </ReactFlowProvider>
 
-            <ReactFlowProvider>
-                <TopologyContent 
-                    nodes={nodes} 
-                    edges={edges} 
-                    onNodesChange={onNodesChange} 
-                    onEdgesChange={onEdgesChange}
-                    onNodeClick={handleNodeClick}
-                    nodeTypes={nodeTypes}
-                />
-            </ReactFlowProvider>
-        </div>
-
-        {/* --- SIDEBAR REFORMULADA --- */}
-        <aside 
-            className={`absolute right-0 top-0 bottom-0 w-96 bg-slate-900 border-l border-slate-800 shadow-2xl backdrop-blur-sm transition-transform duration-300 ease-in-out flex flex-col z-40 ${selectedNode ? 'translate-x-0' : 'translate-x-full'}`}
-        >
+        <aside className={`absolute right-0 top-0 bottom-0 w-[600px] bg-slate-900 border-l border-slate-800 shadow-2xl backdrop-blur-sm transition-transform duration-300 ease-in-out flex flex-col z-40 ${selectedNode ? 'translate-x-0' : 'translate-x-full'}`}>
             {selectedNode && (
                 <>
-                    {/* Cabeçalho Fixo */}
                     <div className="flex-none p-4 border-b border-slate-800 bg-slate-950/50">
                         <div className="flex justify-between items-start mb-2">
-                            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Recurso</h2>
-                            <button onClick={() => setSelectedNode(null)} className="text-slate-400 hover:text-white p-1 hover:bg-slate-800 rounded">
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-                            </button>
+                            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Detalhes</h2>
+                            <button onClick={() => setSelectedNode(null)} className="text-slate-400 hover:text-white"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
                         </div>
-                        <div className="font-semibold text-slate-200 break-all leading-tight">
-                            {selectedNode.data.label}
+                        <div className="font-semibold text-slate-200 text-lg">{selectedNode.data.label}</div>
+                        <div className="flex gap-2 mt-2">
+                            <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded text-slate-400 border border-slate-700">{selectedNode.data.kind}</span>
+                            {selectedNode.data.status && <span className="text-[10px] px-2 py-0.5 rounded text-white font-bold" style={{ backgroundColor: getStatusColor(selectedNode.data.status) }}>{selectedNode.data.status}</span>}
                         </div>
                     </div>
-
-                    {/* Abas */}
                     <div className="flex border-b border-slate-800 bg-slate-900">
-                        <button 
-                            onClick={() => setActiveTab('info')}
-                            className={`flex-1 py-2.5 text-xs font-medium transition-colors ${activeTab === 'info' ? 'text-sky-400 border-b-2 border-sky-400 bg-slate-800/50' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
-                        >
-                            Info
-                        </button>
-                        <button 
-                            onClick={() => setActiveTab('yaml')}
-                            className={`flex-1 py-2.5 text-xs font-medium transition-colors ${activeTab === 'yaml' ? 'text-sky-400 border-b-2 border-sky-400 bg-slate-800/50' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
-                        >
-                            YAML
-                        </button>
-                        <button 
-                            onClick={() => setActiveTab('logs')}
-                            className={`flex-1 py-2.5 text-xs font-medium transition-colors ${activeTab === 'logs' ? 'text-sky-400 border-b-2 border-sky-400 bg-slate-800/50' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
-                        >
-                            Logs
-                        </button>
+                        {['info', 'yaml', 'logs'].map(tab => (
+                            <button key={tab} onClick={() => setActiveTab(tab as any)} className={`flex-1 py-3 text-xs font-bold uppercase tracking-wide transition-colors ${activeTab === tab ? 'text-sky-400 border-b-2 border-sky-400 bg-slate-800/50' : 'text-slate-500 hover:text-slate-200'}`}>{tab}</button>
+                        ))}
                     </div>
-
-                    {/* Conteúdo com Scroll */}
-                    <div className="flex-1 overflow-hidden relative bg-slate-900">
+                    <div className="flex-1 overflow-hidden relative bg-[#020617]">
                         {activeTab === 'info' && (
-                            <div className="absolute inset-0 overflow-y-auto p-4 space-y-6">
-                                <div>
-                                    <label className="text-[10px] text-slate-500 uppercase font-bold block mb-1.5">ID Técnico</label>
-                                    <div className="font-mono text-[11px] text-slate-400 break-all bg-slate-950/50 p-2 rounded border border-dashed border-slate-800">
-                                        {selectedNode.id}
-                                    </div>
-                                </div>
-
-                                {selectedNode.data.labels && Object.keys(selectedNode.data.labels).length > 0 && (
-                                    <div>
-                                        <label className="text-[10px] text-slate-500 uppercase font-bold block mb-2">Labels</label>
-                                        <div className="flex flex-wrap gap-2">
-                                            {Object.entries(selectedNode.data.labels).map(([k, v]) => (
-                                                <div key={k} className="flex text-[10px] border border-slate-700 rounded overflow-hidden shadow-sm">
-                                                    <span className="bg-slate-800 text-slate-400 px-2 py-1 font-medium">{k}</span>
-                                                    <span className="bg-slate-900 text-slate-200 px-2 py-1 border-l border-slate-700">{v as string}</span>
-                                                </div>
-                                            ))}
-                                        </div>
+                            <div className="absolute inset-0 overflow-y-auto p-5 space-y-6">
+                                <div><label className="text-[10px] text-slate-500 uppercase font-bold block mb-1">ID</label><div className="font-mono text-xs text-slate-300 bg-slate-950 p-2 rounded border border-slate-800 break-all">{selectedNode.id}</div></div>
+                                {selectedNode.data.labels && (
+                                    <div><label className="text-[10px] text-slate-500 uppercase font-bold block mb-2">Labels</label>
+                                        <div className="flex flex-wrap gap-2">{Object.entries(selectedNode.data.labels).map(([k, v]) => (
+                                            <div key={k} className="flex text-[10px] border border-slate-700 rounded overflow-hidden"><span className="bg-slate-800 text-slate-400 px-2 py-1">{k}</span><span className="bg-slate-950 text-slate-200 px-2 py-1 border-l border-slate-700">{v as string}</span></div>
+                                        ))}</div>
                                     </div>
                                 )}
                             </div>
                         )}
-
-                        {activeTab === 'yaml' && (
-                            <div className="absolute inset-0 p-4">
-                                <YamlViewer clusterId={clusterId || ''} nodeId={selectedNode.id} />
-                            </div>
-                        )}
-
-                        {activeTab === 'logs' && (
-                            <div className="absolute inset-0 p-4">
-                                <LogViewer clusterId={clusterId || ''} nodeId={selectedNode.id} />
-                            </div>
-                        )}
+                        {activeTab === 'yaml' && <div className="absolute inset-0 p-0"><YamlViewer clusterId={clusterId || ''} nodeId={selectedNode.id} /></div>}
+                        {activeTab === 'logs' && <div className="absolute inset-0 p-0"><LogViewer clusterId={clusterId || ''} nodeId={selectedNode.id} /></div>}
                     </div>
                 </>
             )}
