@@ -323,24 +323,28 @@ const TopologyPage: React.FC = () => {
     
     // VISÃO DE GRUPOS
     if (expandedNamespace === null) {
-        const groups: Record<string, number> = {};
-        fullGraph.nodes.forEach(n => {
-            const ns = n.data.namespace || '_global_';
-            groups[ns] = (groups[ns] || 0) + 1;
-        });
+      const groups: Record<string, number> = {};
+      fullGraph.nodes.forEach(n => {
+        const ns = n.data.namespace || '_global_';
+        groups[ns] = (groups[ns] || 0) + 1;
+      });
 
-        const groupNodes = Object.entries(groups)
-            .filter(([ns]) => ns.toLowerCase().includes(searchTerm.toLowerCase()))
-            .map(([ns, count], idx) => ({
-                id: `ns-${ns}`, type: 'custom',
-                data: { label: ns, count, isGroup: true, originalNamespace: ns },
-                // Layout de Grid simples para grupos
-                position: { x: (idx % 4) * 320, y: Math.floor(idx / 4) * 180 }
-            }));
-        
-        setNodes(groupNodes);
-        setEdges([]);
-        return;
+      const items = Object.entries(groups).filter(([ns]) => ns.toLowerCase().includes(searchTerm.toLowerCase()));
+      // Calcular colunas dinâmicas para favorecer um layout mais horizontal quando há muitos namespaces
+      const totalGroups = items.length;
+      const baseRows = 2; // número de linhas desejado para uma aparência mais 'horizontal'
+      const columns = Math.max(4, Math.min(12, Math.ceil(totalGroups / baseRows)));
+
+      const groupNodes = items.map(([ns, count], idx) => ({
+        id: `ns-${ns}`, type: 'custom',
+        data: { label: ns, count, isGroup: true, originalNamespace: ns },
+        // Grid com muitas colunas para permanecer na horizontal
+        position: { x: (idx % columns) * 320, y: Math.floor(idx / columns) * 180 }
+      }));
+
+      setNodes(groupNodes);
+      setEdges([]);
+      return;
     }
 
     // VISÃO DE DETALHE
@@ -363,11 +367,20 @@ const TopologyPage: React.FC = () => {
     const nodeIds = new Set(currentNodes.map(n => n.id));
     currentEdges = fullGraph.edges.filter(e => nodeIds.has(e.source) && nodeIds.has(e.target));
 
-    // LAYOUT DAGRE (Horizontal)
-    const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(currentNodes, currentEdges);
-
-    setNodes(layoutedNodes);
-    setEdges(layoutedEdges);
+    // Se houver muitos nós, usar um grid horizontal (mais colunas) em vez do Dagre
+    const MANY_NODES_THRESHOLD = 40;
+    if (currentNodes.length > MANY_NODES_THRESHOLD) {
+      const ROWS = 4; // poucas linhas, muitas colunas -> aparência horizontal
+      const cols = Math.max(6, Math.ceil(currentNodes.length / ROWS));
+      const gridNodes = currentNodes.map((n, idx) => ({ ...n, position: { x: (idx % cols) * 320, y: Math.floor(idx / cols) * 180 } }));
+      setNodes(gridNodes);
+      setEdges(currentEdges);
+    } else {
+      // LAYOUT DAGRE (Horizontal)
+      const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(currentNodes, currentEdges);
+      setNodes(layoutedNodes);
+      setEdges(layoutedEdges);
+    }
 
   }, [fullGraph, expandedNamespace, searchTerm, setNodes, setEdges]);
 
