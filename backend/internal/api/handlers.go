@@ -40,44 +40,60 @@ func loginHandler(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		// ---------- DEV MODE (bypass LDAP) ----------
-		if os.Getenv("APP_ENV") == "dev" {
-			// cria ou busca usuário DEV
+		// =====================================================
+		// 🔐 LOGIN LOCAL DE MANUTENÇÃO (BREAK-GLASS)
+		// =====================================================
+		if os.Getenv("ENABLE_LOCAL_LOGIN") == "true" {
+
+			// valida usuário/senha local
+			if !auth.AuthenticateLocal(req.Username, req.Password) {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "credenciais inválidas"})
+				return
+			}
+
+			localUser := os.Getenv("LOCAL_ADMIN_USER")
+			if localUser == "" || req.Username != localUser {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "acesso não autorizado"})
+				return
+			}
+
+			// busca ou cria usuário local
 			var user models.User
-			result := db.DB.Where("username = ?", req.Username).First(&user)
+			result := db.DB.Where("username = ?", localUser).First(&user)
 			if result.Error != nil {
 				user = models.User{
-					Username:    req.Username,
-					DisplayName: "Dev User",
+					Username:    localUser,
+					DisplayName: "Maintenance Admin",
 					Role:        "admin",
+				}
+				db.DB.Create(&user)
 			}
-			db.DB.Create(&user)
-		}
 
-		token, exp, err := auth.GenerateToken(user.Username, user.Role, cfg)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao gerar token"})
+			token, exp, err := auth.GenerateToken(user.Username, user.Role, cfg)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao gerar token"})
+				return
+			}
+
+			c.JSON(http.StatusOK, loginResponse{
+				Token:     token,
+				ExpiresAt: exp,
+				Username:  user.Username,
+				Role:      user.Role,
+			})
 			return
 		}
 
-		c.JSON(http.StatusOK, loginResponse{
-			Token:     token,
-			ExpiresAt: exp,
-			Username:  user.Username,
-			Role:      user.Role,
-		})
-		return
-	}
-	// ---------- FIM DEV MODE ----------
-
-
+		// =====================================================
+		// 🔐 LOGIN PADRÃO (LDAP)
+		// =====================================================
 		_, displayName, err := auth.LDAPAuthenticate(req.Username, req.Password, cfg)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "credenciais inválidas"})
 			return
 		}
 
-		// RBAC básico: primeiro usuário vira admin, demais viewers por padrão.
+		// RBAC básico
 		var user models.User
 		result := db.DB.Where("username = ?", req.Username).First(&user)
 		if result.Error != nil {
@@ -86,7 +102,8 @@ func loginHandler(cfg *config.Config) gin.HandlerFunc {
 				DisplayName: displayName,
 				Role:        "viewer",
 			}
-			// Verifica se é o primeiro usuário
+
+			// primeiro usuário vira admin
 			var count int64
 			db.DB.Model(&models.User{}).Count(&count)
 			if count == 0 {

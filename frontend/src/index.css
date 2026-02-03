@@ -2,7 +2,20 @@
 @tailwind components;
 @tailwind utilities;
 
+/* --- CORREÇÃO OBRIGATÓRIA PARA O REACT FLOW --- */
+/* Isso garante que a aplicação ocupe a tela toda */
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden; /* Evita barras de rolagem duplas */
+}
+/* ---------------------------------------------- */
+
 body {
   @apply bg-slate-950 text-slate-50;
+  /* Garante que a fonte seja renderizada corretamente */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
-
