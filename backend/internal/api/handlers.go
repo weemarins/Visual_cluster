@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"k8s.io/client-go/kubernetes" // Importante para o tipo de retorno do helper
 
 	"github.com/example/vkube-topology/backend/internal/auth"
 	"github.com/example/vkube-topology/backend/internal/config"
@@ -18,7 +19,9 @@ import (
 	"github.com/example/vkube-topology/backend/internal/models"
 )
 
-// ---------- Auth ----------
+// =================================================================================
+// AUTHENTICATION HANDLERS
+// =================================================================================
 
 type loginRequest struct {
 	Username string `json:"username" binding:"required"`
@@ -40,12 +43,8 @@ func loginHandler(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		// =====================================================
 		// 🔐 LOGIN LOCAL DE MANUTENÇÃO (BREAK-GLASS)
-		// =====================================================
 		if os.Getenv("ENABLE_LOCAL_LOGIN") == "true" {
-
-			// valida usuário/senha local
 			if !auth.AuthenticateLocal(req.Username, req.Password) {
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "credenciais inválidas"})
 				return
@@ -57,7 +56,6 @@ func loginHandler(cfg *config.Config) gin.HandlerFunc {
 				return
 			}
 
-			// busca ou cria usuário local
 			var user models.User
 			result := db.DB.Where("username = ?", localUser).First(&user)
 			if result.Error != nil {
@@ -84,16 +82,13 @@ func loginHandler(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		// =====================================================
 		// 🔐 LOGIN PADRÃO (LDAP)
-		// =====================================================
 		_, displayName, err := auth.LDAPAuthenticate(req.Username, req.Password, cfg)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "credenciais inválidas"})
 			return
 		}
 
-		// RBAC básico
 		var user models.User
 		result := db.DB.Where("username = ?", req.Username).First(&user)
 		if result.Error != nil {
@@ -103,7 +98,6 @@ func loginHandler(cfg *config.Config) gin.HandlerFunc {
 				Role:        "viewer",
 			}
 
-			// primeiro usuário vira admin
 			var count int64
 			db.DB.Model(&models.User{}).Count(&count)
 			if count == 0 {
@@ -138,7 +132,9 @@ func meHandler() gin.HandlerFunc {
 	}
 }
 
-// ---------- Clusters ----------
+// =================================================================================
+// CLUSTER CRUD HANDLERS
+// =================================================================================
 
 type clusterDTO struct {
 	ID          uint   `json:"id"`
@@ -147,9 +143,8 @@ type clusterDTO struct {
 }
 
 type createClusterRequest struct {
-	Name        string `json:"name" binding:"required"`
-	Description string `json:"description"`
-	// kubeconfig em base64 para evitar armazenar texto puro em trânsito (opcional mas recomendado)
+	Name             string `json:"name" binding:"required"`
+	Description      string `json:"description"`
 	KubeconfigBase64 string `json:"kubeconfigBase64" binding:"required"`
 }
 
@@ -197,9 +192,9 @@ func createClusterHandler(cfg *config.Config) gin.HandlerFunc {
 		}
 
 		cluster := models.Cluster{
-			Name:               req.Name,
-			Description:        req.Description,
-			OwnerUsername:      claims.Username,
+			Name:                req.Name,
+			Description:         req.Description,
+			OwnerUsername:       claims.Username,
 			EncryptedKubeconfig: ciphertext,
 		}
 
@@ -314,7 +309,78 @@ func deleteClusterHandler(cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
-// ---------- Topologia ----------
+// =================================================================================
+// RESOURCE HANDLERS (YAML & LOGS)
+// =================================================================================
+
+func getResourceYAMLHandler(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 1. Obtém cliente K8s reutilizando lógica do Helper
+		client, err := getK8sClientFromRequest(c, cfg)
+		if err != nil {
+			// O helper já escreveu o erro no JSON response
+			return
+		}
+
+		// 2. Parâmetros da Query
+		ns := c.Query("namespace")
+		name := c.Query("name")
+		kind := c.Query("kind")
+
+		if ns == "" || name == "" || kind == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "namespace, name e kind são obrigatórios"})
+			return
+		}
+
+		// 3. Chama função do pacote k8s (AINDA VAMOS IMPLEMENTAR)
+		yamlContent, err := k8s.GetResourceYAML(context.Background(), client, ns, kind, name)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao buscar YAML: " + err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, yamlContent)
+	}
+}
+
+func getResourceLogsHandler(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		client, err := getK8sClientFromRequest(c, cfg)
+		if err != nil {
+			return
+		}
+
+		ns := c.Query("namespace")
+		name := c.Query("name")
+		container := c.Query("container")
+		tailStr := c.Query("tail")
+
+		tail := 100 // Default
+		if tailStr != "" {
+			if t, err := strconv.Atoi(tailStr); err == nil {
+				tail = t
+			}
+		}
+
+		if ns == "" || name == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "namespace e name são obrigatórios"})
+			return
+		}
+
+		// 3. Chama função do pacote k8s (AINDA VAMOS IMPLEMENTAR)
+		logs, err := k8s.GetPodLogs(context.Background(), client, ns, name, container, int64(tail))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao buscar logs: " + err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"lines": logs})
+	}
+}
+
+// =================================================================================
+// TOPOLOGY HANDLERS
+// =================================================================================
 
 func topologyHandler(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -361,3 +427,40 @@ func topologyHandler(cfg *config.Config) gin.HandlerFunc {
 	}
 }
 
+// =================================================================================
+// HELPERS
+// =================================================================================
+
+// getK8sClientFromRequest busca o cluster pelo ID na URL, verifica permissão e retorna o client K8s
+func getK8sClientFromRequest(c *gin.Context, cfg *config.Config) (*kubernetes.Clientset, error) {
+	// Pega o parametro :id da rota
+	idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id do cluster inválido"})
+		return nil, err
+	}
+
+	claimsVal, _ := c.Get("user")
+	claims := claimsVal.(*auth.Claims)
+
+	var cluster models.Cluster
+	if err := db.DB.Where("id = ? AND owner_username = ?", id, claims.Username).First(&cluster).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "cluster não encontrado"})
+		return nil, err
+	}
+
+	kubeconfig, err := crypto.DecryptAES(cfg.AESKey, cluster.EncryptedKubeconfig)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao decifrar kubeconfig"})
+		return nil, err
+	}
+
+	client, err := k8s.NewClient(kubeconfig)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao criar client Kubernetes"})
+		return nil, err
+	}
+
+	return client, nil
+}

@@ -14,39 +14,117 @@ import ReactFlow, {
   Handle
 } from 'reactflow';
 
-// Importa estilos básicos (backup)
 import 'reactflow/dist/style.css'; 
-
 import { apiClient } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
 
-// --- 1. COMPONENTE DE NÓ CUSTOMIZADO (Visual Bonito e Garantido) ---
+// --- 1. COMPONENTES AUXILIARES DA SIDEBAR ---
+
+// Helper para extrair dados do ID (ex: "pod:default:nginx-123" -> kind, ns, name)
+const parseNodeId = (id: string) => {
+  const parts = id.split(':');
+  // Formato esperado: kind:namespace:name (ex: pod:default:app)
+  if (parts.length === 3) {
+    return { kind: parts[0], namespace: parts[1], name: parts[2] };
+  }
+  // Formato global: kind:name (ex: node:worker-1)
+  if (parts.length === 2) {
+    return { kind: parts[0], namespace: '', name: parts[1] };
+  }
+  return { kind: 'unknown', namespace: '', name: id };
+};
+
+const YamlViewer = ({ clusterId, nodeId }: { clusterId: string, nodeId: string }) => {
+  const [content, setContent] = useState('Carregando YAML...');
+  
+  useEffect(() => {
+    const { kind, namespace, name } = parseNodeId(nodeId);
+    
+    // Capitaliza o Kind (pod -> Pod) para o K8s entender, se necessário
+    const kindCap = kind.charAt(0).toUpperCase() + kind.slice(1);
+
+    apiClient.get(`/clusters/${clusterId}/resources/yaml`, {
+      params: { kind: kindCap, namespace, name }
+    })
+    .then(res => setContent(res.data))
+    .catch(err => {
+      console.error(err);
+      setContent(`Erro ao carregar YAML.\n${err.response?.data?.error || err.message}`);
+    });
+  }, [clusterId, nodeId]);
+
+  return (
+    <pre className="text-[10px] font-mono text-green-300 bg-slate-950 p-3 rounded border border-slate-800 overflow-auto h-full whitespace-pre-wrap">
+      {content}
+    </pre>
+  );
+};
+
+const LogViewer = ({ clusterId, nodeId }: { clusterId: string, nodeId: string }) => {
+  const [logs, setLogs] = useState<string[]>([]);
+  const [status, setStatus] = useState('Conectando...');
+
+  useEffect(() => {
+    const { kind, namespace, name } = parseNodeId(nodeId);
+
+    // Logs só fazem sentido para Pods (geralmente)
+    if (kind.toLowerCase() !== 'pod') {
+      setLogs(['Logs estão disponíveis apenas para Pods.']);
+      setStatus('');
+      return;
+    }
+
+    setLogs([]);
+    setStatus('Buscando logs...');
+
+    const fetchLogs = () => {
+      apiClient.get(`/clusters/${clusterId}/resources/logs`, {
+        params: { namespace, name, tail: 50 }
+      })
+      .then(res => {
+        setLogs(res.data.lines || []);
+        setStatus('Atualizado em ' + new Date().toLocaleTimeString());
+      })
+      .catch(err => {
+        setStatus('Erro ao buscar logs.');
+        setLogs([err.response?.data?.error || 'Falha na conexão']);
+      });
+    };
+
+    fetchLogs();
+    const interval = setInterval(fetchLogs, 4000); // Atualiza a cada 4s
+    return () => clearInterval(interval);
+
+  }, [clusterId, nodeId]);
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="bg-black text-slate-300 font-mono text-[10px] p-3 flex-1 overflow-y-auto rounded border border-slate-800">
+        {logs.length === 0 && <span className="text-slate-500 italic">Nenhum log encontrado ou carregando...</span>}
+        {logs.map((line, i) => (
+          <div key={i} className="border-b border-slate-900/50 py-0.5 break-all hover:bg-slate-900">{line}</div>
+        ))}
+      </div>
+      <div className="text-[9px] text-slate-500 text-right mt-1">{status}</div>
+    </div>
+  );
+};
+
+// --- 2. NÓ CUSTOMIZADO ---
 const ResourceNode = ({ data }: any) => {
-  // Cores dinâmicas baseadas no tipo ou status (pode expandir depois)
   const isGroup = data.isGroup;
   
   if (isGroup) {
-    // ESTILO DO CARD DE NAMESPACE (GRANDE)
     return (
       <div style={{ 
         background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)', 
-        border: '2px solid #6366f1', 
-        borderRadius: '12px',
-        padding: '20px', 
-        width: '280px',
-        height: '140px',
-        color: 'white',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        boxShadow: '0 10px 25px -5px rgba(99, 102, 241, 0.4)',
-        cursor: 'pointer',
+        border: '2px solid #6366f1', borderRadius: '12px', padding: '20px', 
+        width: '280px', height: '140px', color: 'white', display: 'flex', 
+        flexDirection: 'column', alignItems: 'center', justifyContent: 'center', 
+        boxShadow: '0 10px 25px -5px rgba(99, 102, 241, 0.4)', cursor: 'pointer',
         transition: 'transform 0.2s'
       }}>
-        <div style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '8px' }}>
-            {data.label}
-        </div>
+        <div style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '8px' }}>{data.label}</div>
         <div style={{ fontSize: '12px', color: '#a5b4fc', background: '#312e81', padding: '4px 10px', borderRadius: '20px' }}>
             Clique para entrar
         </div>
@@ -56,30 +134,17 @@ const ResourceNode = ({ data }: any) => {
     );
   }
 
-  // ESTILO DO NÓ DE RECURSO (PEQUENO)
   return (
     <div style={{ 
-      background: '#020617', 
-      border: '1px solid #334155', 
-      borderRadius: '6px',
-      padding: '8px', 
-      width: '160px',
-      color: '#e2e8f0',
-      textAlign: 'center',
-      fontSize: '11px',
-      boxShadow: '0 2px 4px rgba(0,0,0,0.5)',
-      position: 'relative'
+      background: '#020617', border: '1px solid #334155', borderRadius: '6px', 
+      padding: '8px', width: '160px', color: '#e2e8f0', textAlign: 'center', 
+      fontSize: '11px', boxShadow: '0 2px 4px rgba(0,0,0,0.5)', position: 'relative'
     }}>
       <Handle type="target" position={Position.Left} style={{ background: '#38bdf8', width: '6px', height: '6px' }} />
-      
       <div style={{ fontWeight: '600', marginBottom: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {data.label}
       </div>
-      
-      <div style={{ fontSize: '9px', color: '#64748b', fontFamily: 'monospace' }}>
-        {data.id_short}
-      </div>
-
+      <div style={{ fontSize: '9px', color: '#64748b', fontFamily: 'monospace' }}>{data.id_short}</div>
       <Handle type="source" position={Position.Right} style={{ background: '#38bdf8', width: '6px', height: '6px' }} />
     </div>
   );
@@ -97,6 +162,7 @@ type GraphNode = {
     isGroup?: boolean;
     count?: number;
     originalNamespace?: string;
+    id_short?: string;
   };
 };
 
@@ -124,7 +190,6 @@ const TopologyContent: React.FC<{
 }> = ({ nodes, edges, onNodesChange, onEdgesChange, onNodeClick, nodeTypes }) => {
   const { fitView } = useReactFlow();
 
-  // Ajusta o zoom suavemente quando a estrutura muda
   useEffect(() => {
     if (nodes.length > 0) {
         setTimeout(() => {
@@ -141,9 +206,8 @@ const TopologyContent: React.FC<{
       onEdgesChange={onEdgesChange}
       onNodeClick={onNodeClick}
       nodeTypes={nodeTypes}
-      minZoom={0.02} // Zoom bem distante permitido para ver 1200 nós
+      minZoom={0.02}
       maxZoom={3}
-      // Performance: só renderiza o que está na tela
       onlyRenderVisibleElements={true} 
       defaultEdgeOptions={{ type: 'smoothstep', animated: false }}
       style={{ width: '100%', height: '100%', background: '#0f172a' }}
@@ -170,22 +234,20 @@ const TopologyPage: React.FC = () => {
   const [expandedNamespace, setExpandedNamespace] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [hasMultipleNamespaces, setHasMultipleNamespaces] = useState(true);
+  
+  // Estado para controlar as abas da Sidebar
+  const [activeTab, setActiveTab] = useState<'info' | 'yaml' | 'logs'>('info');
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
 
-  // Memoriza o tipo de nó para não recriar a cada render
   const nodeTypes = useMemo(() => ({ custom: ResourceNode }), []);
 
-  // --- Layout Engine (Grid Inteligente) ---
   const computeLayout = useCallback((nodesToLayout: any[], edgesToLayout: any[], isGroupMode: boolean) => {
     const count = nodesToLayout.length;
     if (count === 0) return { nodes: [], edges: [] };
 
-    // Define colunas baseado na raiz quadrada para formar um retângulo
     const COLS = Math.ceil(Math.sqrt(count * (isGroupMode ? 2 : 1.8))) || 4;
-    
-    // Espaçamento ajustado para não sobrepor
     const X_GAP = isGroupMode ? 320 : 200;
     const Y_GAP = isGroupMode ? 180 : 100;
 
@@ -198,7 +260,6 @@ const TopologyPage: React.FC = () => {
         type: 'custom',
         data: { 
             ...n.data, 
-            // ID curto para exibição visual
             id_short: n.id.length > 25 ? n.id.substring(0, 22) + '...' : n.id 
         },
         position: { x: col * X_GAP, y: row * Y_GAP },
@@ -210,11 +271,9 @@ const TopologyPage: React.FC = () => {
     return { nodes: layoutNodes, edges: edgesToLayout };
   }, []);
 
-  // --- Processamento dos Dados (Filtro e Agrupamento) ---
   const processView = useCallback(() => {
     if (!fullGraph || !fullGraph.nodes) return;
 
-    // 1. Agrupar
     const groups: Record<string, number> = {};
     fullGraph.nodes.forEach(n => {
       const ns = n.data.namespace || '_global_';
@@ -223,7 +282,6 @@ const TopologyPage: React.FC = () => {
 
     const uniqueNamespaces = Object.keys(groups);
 
-    // 2. Auto-detecção: Se só tem 1 namespace, entra nele direto
     if (uniqueNamespaces.length === 1 && expandedNamespace === null) {
         setHasMultipleNamespaces(false);
         setExpandedNamespace(uniqueNamespaces[0]);
@@ -232,9 +290,7 @@ const TopologyPage: React.FC = () => {
 
     if (uniqueNamespaces.length > 1) setHasMultipleNamespaces(true);
 
-    // 3. Renderizar
     if (expandedNamespace === null) {
-      // MODO: VISÃO GERAL (Cards de Namespace)
       const groupNodes = Object.entries(groups).map(([ns, count]) => ({
         id: `ns-${ns}`,
         type: 'custom',
@@ -247,19 +303,16 @@ const TopologyPage: React.FC = () => {
         position: { x: 0, y: 0 }
       }));
       
-      // Sem arestas na visão geral
       const { nodes: lNodes } = computeLayout(groupNodes, [], true);
       setNodes(lNodes);
       setEdges([]); 
     
     } else {
-      // MODO: DETALHE (Nós Reais)
       const filteredNodes = fullGraph.nodes.filter(n => {
         const ns = n.data.namespace || '_global_';
         return ns === expandedNamespace;
       });
 
-      // Filtra arestas para manter apenas as visíveis no namespace atual
       const nodeIds = new Set(filteredNodes.map(n => n.id));
       const filteredEdges = fullGraph.edges.filter(e => 
         nodeIds.has(e.source) && nodeIds.has(e.target)
@@ -274,12 +327,10 @@ const TopologyPage: React.FC = () => {
     }
   }, [fullGraph, expandedNamespace, computeLayout, setNodes, setEdges]);
 
-  // Dispara o processamento quando os dados mudam
   useEffect(() => {
     processView();
   }, [processView]);
 
-  // --- Busca de Dados ---
   const fetchGraph = async (isBackground = false) => {
     if (!clusterId) return;
     if (!isBackground) setLoading(true);
@@ -298,27 +349,27 @@ const TopologyPage: React.FC = () => {
     }
   };
 
-  // Carga inicial
   useEffect(() => {
     void fetchGraph(false);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clusterId]);
 
-  // Polling silencioso
   useEffect(() => {
     const id = setInterval(() => void fetchGraph(true), POLL_INTERVAL_MS);
     return () => clearInterval(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clusterId]);
 
-  // --- Interações ---
   const handleNodeClick = (_: React.MouseEvent, node: Node) => {
     if (node.data.isGroup) {
       setExpandedNamespace(node.data.originalNamespace);
       setSelectedNode(null);
     } else {
       const originalNode = fullGraph?.nodes.find(n => n.id === node.id);
-      if (originalNode) setSelectedNode(originalNode);
+      if (originalNode) {
+          setSelectedNode(originalNode);
+          setActiveTab('info'); // Reseta a aba ao abrir novo nó
+      }
     }
   };
 
@@ -358,7 +409,6 @@ const TopologyPage: React.FC = () => {
       </header>
 
       <main className="flex-1 relative w-full h-full">
-        {/* Container Absoluto para garantir altura */}
         <div className="absolute inset-0 z-0">
             {loading && (
                 <div className="absolute inset-0 flex items-center justify-center z-50 bg-slate-950/60 backdrop-blur-sm">
@@ -381,49 +431,87 @@ const TopologyPage: React.FC = () => {
             </ReactFlowProvider>
         </div>
 
-        {/* Sidebar Deslizante */}
+        {/* --- SIDEBAR REFORMULADA --- */}
         <aside 
-            className={`absolute right-0 top-0 bottom-0 w-80 bg-slate-900/95 border-l border-slate-800 p-5 z-40 shadow-2xl backdrop-blur-sm transition-transform duration-300 ease-in-out ${selectedNode ? 'translate-x-0' : 'translate-x-full'}`}
+            className={`absolute right-0 top-0 bottom-0 w-96 bg-slate-900 border-l border-slate-800 shadow-2xl backdrop-blur-sm transition-transform duration-300 ease-in-out flex flex-col z-40 ${selectedNode ? 'translate-x-0' : 'translate-x-full'}`}
         >
             {selectedNode && (
-                <div className="flex flex-col h-full">
-                    <div className="flex justify-between items-center mb-6">
-                        <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Detalhes do Recurso</h2>
-                        <button onClick={() => setSelectedNode(null)} className="text-slate-400 hover:text-white p-1 hover:bg-slate-800 rounded">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                <>
+                    {/* Cabeçalho Fixo */}
+                    <div className="flex-none p-4 border-b border-slate-800 bg-slate-950/50">
+                        <div className="flex justify-between items-start mb-2">
+                            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Recurso</h2>
+                            <button onClick={() => setSelectedNode(null)} className="text-slate-400 hover:text-white p-1 hover:bg-slate-800 rounded">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                            </button>
+                        </div>
+                        <div className="font-semibold text-slate-200 break-all leading-tight">
+                            {selectedNode.data.label}
+                        </div>
+                    </div>
+
+                    {/* Abas */}
+                    <div className="flex border-b border-slate-800 bg-slate-900">
+                        <button 
+                            onClick={() => setActiveTab('info')}
+                            className={`flex-1 py-2.5 text-xs font-medium transition-colors ${activeTab === 'info' ? 'text-sky-400 border-b-2 border-sky-400 bg-slate-800/50' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
+                        >
+                            Info
+                        </button>
+                        <button 
+                            onClick={() => setActiveTab('yaml')}
+                            className={`flex-1 py-2.5 text-xs font-medium transition-colors ${activeTab === 'yaml' ? 'text-sky-400 border-b-2 border-sky-400 bg-slate-800/50' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
+                        >
+                            YAML
+                        </button>
+                        <button 
+                            onClick={() => setActiveTab('logs')}
+                            className={`flex-1 py-2.5 text-xs font-medium transition-colors ${activeTab === 'logs' ? 'text-sky-400 border-b-2 border-sky-400 bg-slate-800/50' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
+                        >
+                            Logs
                         </button>
                     </div>
 
-                    <div className="space-y-6 flex-1 overflow-y-auto pr-2">
-                        <div>
-                            <label className="text-[10px] text-slate-500 uppercase font-bold block mb-1.5">Label</label>
-                            <div className="font-mono text-sm text-slate-200 bg-slate-950 p-3 rounded border border-slate-800 break-all leading-relaxed">
-                                {selectedNode.data.label}
-                            </div>
-                        </div>
-
-                        <div>
-                            <label className="text-[10px] text-slate-500 uppercase font-bold block mb-1.5">ID Técnico</label>
-                            <div className="font-mono text-[11px] text-slate-400 break-all bg-slate-950/50 p-2 rounded border border-dashed border-slate-800">
-                                {selectedNode.id}
-                            </div>
-                        </div>
-
-                        {selectedNode.data.labels && Object.keys(selectedNode.data.labels).length > 0 && (
-                            <div>
-                                <label className="text-[10px] text-slate-500 uppercase font-bold block mb-2">Labels</label>
-                                <div className="flex flex-wrap gap-2">
-                                    {Object.entries(selectedNode.data.labels).map(([k, v]) => (
-                                        <div key={k} className="flex text-[10px] border border-slate-700 rounded overflow-hidden shadow-sm">
-                                            <span className="bg-slate-800 text-slate-400 px-2 py-1 font-medium">{k}</span>
-                                            <span className="bg-slate-900 text-slate-200 px-2 py-1 border-l border-slate-700">{v}</span>
-                                        </div>
-                                    ))}
+                    {/* Conteúdo com Scroll */}
+                    <div className="flex-1 overflow-hidden relative bg-slate-900">
+                        {activeTab === 'info' && (
+                            <div className="absolute inset-0 overflow-y-auto p-4 space-y-6">
+                                <div>
+                                    <label className="text-[10px] text-slate-500 uppercase font-bold block mb-1.5">ID Técnico</label>
+                                    <div className="font-mono text-[11px] text-slate-400 break-all bg-slate-950/50 p-2 rounded border border-dashed border-slate-800">
+                                        {selectedNode.id}
+                                    </div>
                                 </div>
+
+                                {selectedNode.data.labels && Object.keys(selectedNode.data.labels).length > 0 && (
+                                    <div>
+                                        <label className="text-[10px] text-slate-500 uppercase font-bold block mb-2">Labels</label>
+                                        <div className="flex flex-wrap gap-2">
+                                            {Object.entries(selectedNode.data.labels).map(([k, v]) => (
+                                                <div key={k} className="flex text-[10px] border border-slate-700 rounded overflow-hidden shadow-sm">
+                                                    <span className="bg-slate-800 text-slate-400 px-2 py-1 font-medium">{k}</span>
+                                                    <span className="bg-slate-900 text-slate-200 px-2 py-1 border-l border-slate-700">{v as string}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {activeTab === 'yaml' && (
+                            <div className="absolute inset-0 p-4">
+                                <YamlViewer clusterId={clusterId || ''} nodeId={selectedNode.id} />
+                            </div>
+                        )}
+
+                        {activeTab === 'logs' && (
+                            <div className="absolute inset-0 p-4">
+                                <LogViewer clusterId={clusterId || ''} nodeId={selectedNode.id} />
                             </div>
                         )}
                     </div>
-                </div>
+                </>
             )}
         </aside>
       </main>
