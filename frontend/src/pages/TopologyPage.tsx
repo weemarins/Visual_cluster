@@ -405,11 +405,11 @@ const TopologyPage: React.FC = () => {
           <div className="h-5 w-px bg-slate-700 mx-1" />
           <h1 className="text-sm font-medium text-slate-200 flex items-center gap-2 whitespace-nowrap">
             {expandedNamespace ? (
-               <>
-                 <span onClick={() => { setExpandedNamespace(null); setSelectedNode(null); }} className="cursor-pointer text-slate-400 hover:text-white">Namespaces</span>
-                 <span className="text-slate-600">/</span>
-                 <span className="text-sky-400 font-semibold">{expandedNamespace}</span>
-               </>
+               <> 
+                 <span onClick={() => { setExpandedNamespace(null); setSelectedNode(null); }} className="cursor-pointer text-slate-400 hover:text-white">Namespaces</span> 
+                 <span className="text-slate-600">/</span> 
+                 <span className="text-sky-400 font-semibold">{expandedNamespace}</span> 
+               </> 
             ) : 'Visão Geral'}
           </h1>
           <div className="ml-8 relative max-w-md w-full">
@@ -420,7 +420,7 @@ const TopologyPage: React.FC = () => {
         <button onClick={logout} className="text-xs text-slate-400 hover:text-white">Sair</button>
       </header>
 
-      <main className="flex-1 relative w-full h-full">
+      <main className="flex-1 relative w-full">
         {loading && <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm"><span className="text-sky-400 animate-pulse font-mono">Carregando Topologia...</span></div>}
         
         <ReactFlowProvider>

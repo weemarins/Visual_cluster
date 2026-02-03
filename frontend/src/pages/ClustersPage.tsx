@@ -79,7 +79,7 @@ const ClustersPage: React.FC = () => {
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-950">
-      <header className="flex items-center justify-between px-6 py-3 border-b border-slate-800 bg-slate-900/80">
+      <header className="flex-none h-16 flex items-center justify-between px-6 border-b border-slate-800 bg-slate-900/80">
         <div>
           <h1 className="text-lg font-semibold text-slate-50">Clusters Kubernetes</h1>
           <p className="text-xs text-slate-400">Visualização interativa de topologia</p>
@@ -100,8 +100,8 @@ const ClustersPage: React.FC = () => {
         </div>
       </header>
 
-      <main className="flex-1 flex flex-col lg:flex-row gap-6 p-6">
-        <section className="flex-1 bg-slate-900/70 border border-slate-800 rounded-xl p-4 overflow-auto">
+      <main className="flex-1 flex flex-col lg:flex-row gap-6 p-6 overflow-hidden">
+        <section className="flex-1 min-h-0 bg-slate-900/70 border border-slate-800 rounded-xl p-4 overflow-auto">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-sm font-semibold text-slate-200">Meus clusters</h2>
             {loading && <span className="text-xs text-slate-400">Carregando...</span>}
@@ -152,7 +152,7 @@ const ClustersPage: React.FC = () => {
         </section>
 
         {role === 'admin' && (
-          <section className="w-full lg:w-96 bg-slate-900/70 border border-slate-800 rounded-xl p-4">
+          <section className="flex-none w-full lg:w-80 min-h-0 bg-slate-900/70 border border-slate-800 rounded-xl p-4 overflow-auto">
             <h2 className="text-sm font-semibold text-slate-200 mb-4">Novo cluster</h2>
             <form className="space-y-3" onSubmit={handleCreate}>
               <div>
