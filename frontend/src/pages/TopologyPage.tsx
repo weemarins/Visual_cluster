@@ -18,6 +18,20 @@ import 'reactflow/dist/style.css';
 import { apiClient } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
 
+// --- CONFIGURAÇÃO DE CORES POR TIPO ---
+const resourceColors: Record<string, { bg: string; border: string; text: string }> = {
+  Pod:           { bg: '#022c22', border: '#10b981', text: '#34d399' }, // Emerald (Verde)
+  Deployment:    { bg: '#0f172a', border: '#3b82f6', text: '#60a5fa' }, // Blue (Azul)
+  Service:       { bg: '#2a1205', border: '#f97316', text: '#fb923c' }, // Orange (Laranja)
+  StatefulSet:   { bg: '#1e1b4b', border: '#8b5cf6', text: '#a78bfa' }, // Violet (Roxo)
+  DaemonSet:     { bg: '#370b18', border: '#ec4899', text: '#f472b6' }, // Pink (Rosa)
+  ReplicaSet:    { bg: '#171717', border: '#525252', text: '#a3a3a3' }, // Neutral (Cinza)
+  HPA:           { bg: '#2e1065', border: '#c084fc', text: '#e879f9' }, // Purple (Lilás)
+  Node:          { bg: '#172554', border: '#1d4ed8', text: '#bfdbfe' }, // Blue Dark
+  // Fallback (Padrão)
+  default:       { bg: '#020617', border: '#334155', text: '#e2e8f0' },
+};
+
 // --- 1. COMPONENTES AUXILIARES DA SIDEBAR ---
 
 // Helper para extrair dados do ID (ex: "pod:default:nginx-123" -> kind, ns, name)
@@ -110,10 +124,11 @@ const LogViewer = ({ clusterId, nodeId }: { clusterId: string, nodeId: string })
   );
 };
 
-// --- 2. NÓ CUSTOMIZADO ---
+// --- 2. NÓ CUSTOMIZADO (ATUALIZADO COM CORES) ---
 const ResourceNode = ({ data }: any) => {
   const isGroup = data.isGroup;
   
+  // MODO GRUPO (NAMESPACE)
   if (isGroup) {
     return (
       <div style={{ 
@@ -123,7 +138,7 @@ const ResourceNode = ({ data }: any) => {
         flexDirection: 'column', alignItems: 'center', justifyContent: 'center', 
         boxShadow: '0 10px 25px -5px rgba(99, 102, 241, 0.4)', cursor: 'pointer',
         transition: 'transform 0.2s'
-      }}>
+      }} className="hover:scale-105">
         <div style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '8px' }}>{data.label}</div>
         <div style={{ fontSize: '12px', color: '#a5b4fc', background: '#312e81', padding: '4px 10px', borderRadius: '20px' }}>
             Clique para entrar
@@ -134,18 +149,64 @@ const ResourceNode = ({ data }: any) => {
     );
   }
 
+  // MODO RECURSO (POD, DEPLOYMENT, ETC)
+  const kind = data.kind || 'default';
+  const style = resourceColors[kind] || resourceColors.default;
+
   return (
     <div style={{ 
-      background: '#020617', border: '1px solid #334155', borderRadius: '6px', 
-      padding: '8px', width: '160px', color: '#e2e8f0', textAlign: 'center', 
-      fontSize: '11px', boxShadow: '0 2px 4px rgba(0,0,0,0.5)', position: 'relative'
-    }}>
-      <Handle type="target" position={Position.Left} style={{ background: '#38bdf8', width: '6px', height: '6px' }} />
-      <div style={{ fontWeight: '600', marginBottom: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {data.label}
+      background: style.bg, 
+      border: `1px solid ${style.border}`, 
+      borderRadius: '8px', 
+      padding: '8px 10px', 
+      width: '160px', 
+      color: '#e2e8f0', 
+      textAlign: 'center', 
+      fontSize: '11px', 
+      boxShadow: `0 4px 6px -1px rgba(0,0,0,0.5), 0 0 15px -5px ${style.border}40`,
+      position: 'relative',
+      transition: 'all 0.2s'
+    }} className="hover:brightness-110">
+      
+      {/* Handle de Entrada colorido */}
+      <Handle 
+        type="target" 
+        position={Position.Left} 
+        style={{ background: style.border, width: '8px', height: '8px', border: 'none' }} 
+      />
+      
+      {/* Título do Nó */}
+      <div style={{ 
+        fontWeight: '700', 
+        marginBottom: '4px', 
+        overflow: 'hidden', 
+        textOverflow: 'ellipsis', 
+        whiteSpace: 'nowrap',
+        color: style.text 
+      }}>
+        {/* Remove prefixo visualmente se houver (ex pod:nome -> nome) */}
+        {data.label.includes(':') ? data.label.split(':')[1] : data.label}
       </div>
-      <div style={{ fontSize: '9px', color: '#64748b', fontFamily: 'monospace' }}>{data.id_short}</div>
-      <Handle type="source" position={Position.Right} style={{ background: '#38bdf8', width: '6px', height: '6px' }} />
+      
+      {/* Badge do Tipo */}
+      <div style={{ 
+        display: 'inline-block',
+        fontSize: '9px', 
+        color: style.text, 
+        background: 'rgba(0,0,0,0.3)',
+        padding: '2px 6px',
+        borderRadius: '4px',
+        fontFamily: 'monospace'
+      }}>
+        {kind.toUpperCase()}
+      </div>
+
+      {/* Handle de Saída colorido */}
+      <Handle 
+        type="source" 
+        position={Position.Right} 
+        style={{ background: style.border, width: '8px', height: '8px', border: 'none' }} 
+      />
     </div>
   );
 };
@@ -158,6 +219,7 @@ type GraphNode = {
   data: {
     label: string;
     namespace?: string;
+    kind?: string; // Adicionado para suportar cores
     labels?: Record<string, string>;
     isGroup?: boolean;
     count?: number;
@@ -213,7 +275,12 @@ const TopologyContent: React.FC<{
       style={{ width: '100%', height: '100%', background: '#0f172a' }}
     >
       <MiniMap 
-        nodeColor={(n) => n.data.isGroup ? '#6366f1' : '#334155'} 
+        nodeColor={(n) => {
+           if (n.data.isGroup) return '#6366f1';
+           // Minimap colorido também!
+           const kind = n.data.kind || 'default';
+           return resourceColors[kind]?.border || '#334155';
+        }} 
         maskColor="#020617ee" 
         style={{ backgroundColor: '#0f172a' }}
       />
