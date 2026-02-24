@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"k8s.io/client-go/kubernetes" // Importante para o tipo de retorno do helper
+	"k8s.io/client-go/rest"
 
 	"github.com/example/vkube-topology/backend/internal/auth"
 	"github.com/example/vkube-topology/backend/internal/config"
@@ -316,7 +317,7 @@ func deleteClusterHandler(cfg *config.Config) gin.HandlerFunc {
 func getResourceYAMLHandler(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 1. Obtém cliente K8s reutilizando lógica do Helper
-		client, err := getK8sClientFromRequest(c, cfg)
+		_, restCfg, err := getK8sClientFromRequest(c, cfg)
 		if err != nil {
 			// O helper já escreveu o erro no JSON response
 			return
@@ -332,8 +333,8 @@ func getResourceYAMLHandler(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		// 3. Chama função do pacote k8s (AINDA VAMOS IMPLEMENTAR)
-		yamlContent, err := k8s.GetResourceYAML(context.Background(), client, ns, kind, name)
+		// 3. Chama função do pacote k8s (agora genérica)
+		yamlContent, err := k8s.GetResourceYAML(context.Background(), restCfg, ns, kind, name)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao buscar YAML: " + err.Error()})
 			return
@@ -345,7 +346,7 @@ func getResourceYAMLHandler(cfg *config.Config) gin.HandlerFunc {
 
 func getResourceLogsHandler(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		client, err := getK8sClientFromRequest(c, cfg)
+		client, _, err := getK8sClientFromRequest(c, cfg)
 		if err != nil {
 			return
 		}
@@ -411,7 +412,7 @@ func topologyHandler(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		client, err := k8s.NewClient(kubeconfig)
+		client, _, err := k8s.NewClient(kubeconfig)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao criar client Kubernetes"})
 			return
@@ -432,13 +433,13 @@ func topologyHandler(cfg *config.Config) gin.HandlerFunc {
 // =================================================================================
 
 // getK8sClientFromRequest busca o cluster pelo ID na URL, verifica permissão e retorna o client K8s
-func getK8sClientFromRequest(c *gin.Context, cfg *config.Config) (*kubernetes.Clientset, error) {
+func getK8sClientFromRequest(c *gin.Context, cfg *config.Config) (*kubernetes.Clientset, *rest.Config, error) {
 	// Pega o parametro :id da rota
 	idStr := c.Param("id")
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id do cluster inválido"})
-		return nil, err
+		return nil, nil, err
 	}
 
 	claimsVal, _ := c.Get("user")
@@ -447,20 +448,20 @@ func getK8sClientFromRequest(c *gin.Context, cfg *config.Config) (*kubernetes.Cl
 	var cluster models.Cluster
 	if err := db.DB.Where("id = ? AND owner_username = ?", id, claims.Username).First(&cluster).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "cluster não encontrado"})
-		return nil, err
+		return nil, nil, err
 	}
 
 	kubeconfig, err := crypto.DecryptAES(cfg.AESKey, cluster.EncryptedKubeconfig)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao decifrar kubeconfig"})
-		return nil, err
+		return nil, nil, err
 	}
 
-	client, err := k8s.NewClient(kubeconfig)
+	client, restCfg, err := k8s.NewClient(kubeconfig)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao criar client Kubernetes"})
-		return nil, err
+		return nil, nil, err
 	}
 
-	return client, nil
+	return client, restCfg, nil
 }

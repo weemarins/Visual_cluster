@@ -5,57 +5,88 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
+	memory "k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"sigs.k8s.io/yaml" // Você precisará importar isso ou usar encoding/json
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/restmapper"
+	"sigs.k8s.io/yaml"
 )
 
-// GetResourceYAML busca o recurso e o converte para YAML
-func GetResourceYAML(ctx context.Context, client *kubernetes.Clientset, ns, kind, name string) (string, error) {
-	// K8s client-go não tem um "Get Generic" fácil sem usar dynamic client.
-	// Para simplificar, vamos implementar switch cases para os tipos mais comuns.
-	// Se precisar de TODOS os tipos, teríamos que usar client.Dynamic().
-
-	var obj interface{}
-	var err error
-
-	switch kind {
-	case "Pod":
-		obj, err = client.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
-	case "Service":
-		obj, err = client.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
-	case "Deployment":
-		obj, err = client.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
-	case "StatefulSet":
-		obj, err = client.AppsV1().StatefulSets(ns).Get(ctx, name, metav1.GetOptions{})
-	case "DaemonSet":
-		obj, err = client.AppsV1().DaemonSets(ns).Get(ctx, name, metav1.GetOptions{})
-	case "ReplicaSet":
-		obj, err = client.AppsV1().ReplicaSets(ns).Get(ctx, name, metav1.GetOptions{})
-	case "Namespace":
-		obj, err = client.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
-	case "Node":
-		obj, err = client.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
-	default:
-		return "", fmt.Errorf("tipo de recurso não suportado para visualização YAML: %s", kind)
+// GetResourceYAML busca qualquer recurso Kubernetes (incluindo CRDs)
+// usando o dynamic client e o RESTMapper para descobrir o GVR.
+func GetResourceYAML(ctx context.Context, restCfg *rest.Config, ns, kind, name string) (string, error) {
+	// Cria discovery client e mapper
+	disco, err := discovery.NewDiscoveryClientForConfig(restCfg)
+	if err != nil {
+		return "", fmt.Errorf("erro ao criar discovery client: %w", err)
 	}
 
-	if err != nil {
-		return "", err
+	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(disco))
+
+	// Tentativas de normalizar o 'kind' recebido: pode ser "pod", "pods", "Pod"
+	candidates := []string{kind, strings.Title(kind)}
+	if strings.HasSuffix(strings.ToLower(kind), "s") {
+		// tenta singularizar simples
+		candidates = append(candidates, strings.TrimSuffix(strings.Title(kind), "s"))
+	} else {
+		candidates = append(candidates, kind+"s")
 	}
 
-	// Remove campos sujos do client-go (managedFields costumam poluir muito a view)
-	// Isso é opcional, mas melhora a leitura.
-	// Nota: Em Go puro sem reflection profunda é difícil limpar campos específicos de structs tipadas.
-	// O mais simples é converter para JSON/YAML direto.
+	var mapping *meta.RESTMapping
+	for _, cand := range candidates {
+		gk := schema.GroupKind{Kind: cand}
+		m, err := mapper.RESTMapping(gk, "")
+		if err == nil {
+			mapping = m
+			break
+		}
+	}
 
-	// Converte objeto Go -> YAML
-	// Usamos sigs.k8s.io/yaml que é o padrão do K8s, mas pode usar gopkg.in/yaml.v2
-	y, err := yaml.Marshal(obj)
+	if mapping == nil {
+		return "", fmt.Errorf("tipo de recurso não suportado ou não encontrado: %s", kind)
+	}
+
+	dyn, err := dynamic.NewForConfig(restCfg)
 	if err != nil {
-		return "", fmt.Errorf("erro ao converter para yaml: %w", err)
+		return "", fmt.Errorf("erro ao criar dynamic client: %w", err)
+	}
+
+	var res *unstructured.Unstructured
+	resource := dyn.Resource(mapping.Resource)
+	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+		if ns == "all" || ns == "" {
+			return "", fmt.Errorf("namespace obrigatório para recursos com escopo de namespace")
+		}
+		resObj, err := resource.Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		res = resObj
+	} else {
+		resObj, err := resource.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		res = resObj
+	}
+
+	// Converter para YAML
+	jsonBytes, err := res.MarshalJSON()
+	if err != nil {
+		return "", fmt.Errorf("erro ao converter recurso para json: %w", err)
+	}
+	y, err := yaml.JSONToYAML(jsonBytes)
+	if err != nil {
+		return "", fmt.Errorf("erro ao converter json->yaml: %w", err)
 	}
 
 	return string(y), nil
@@ -85,10 +116,7 @@ func GetPodLogs(ctx context.Context, client *kubernetes.Clientset, ns, name, con
 
 	// Quebra em linhas
 	lines := []string{}
-	// Processamento simples de string (pode otimizar para logs gigantes)
 	raw := buf.String()
-	// Split manual ou usando strings.Split
-	// Vamos fazer um split simples
 	currentLine := ""
 	for _, char := range raw {
 		if char == '\n' {
@@ -104,3 +132,5 @@ func GetPodLogs(ctx context.Context, client *kubernetes.Clientset, ns, name, con
 
 	return lines, nil
 }
+
+
