@@ -32,27 +32,25 @@ func GetResourceYAML(ctx context.Context, restCfg *rest.Config, ns, kind, name s
 
 	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(disco))
 
-	// Tentativas de normalizar o 'kind' recebido: pode ser "pod", "pods", "Pod"
+	// Primeiro tentamos via RESTMapper (boa opção para recursos core e bem registrados)
 	candidates := []string{kind, strings.Title(kind)}
 	if strings.HasSuffix(strings.ToLower(kind), "s") {
-		// tenta singularizar simples
 		candidates = append(candidates, strings.TrimSuffix(strings.Title(kind), "s"))
 	} else {
 		candidates = append(candidates, kind+"s")
 	}
 
-	var mapping *meta.RESTMapping
+	var gvr schema.GroupVersionResource
+	var namespaced bool
+
 	for _, cand := range candidates {
 		gk := schema.GroupKind{Kind: cand}
 		m, err := mapper.RESTMapping(gk, "")
 		if err == nil {
-			mapping = m
+			gvr = m.Resource
+			namespaced = (m.Scope.Name() == meta.RESTScopeNameNamespace)
 			break
 		}
-	}
-
-	if mapping == nil {
-		return "", fmt.Errorf("tipo de recurso não suportado ou não encontrado: %s", kind)
 	}
 
 	dyn, err := dynamic.NewForConfig(restCfg)
@@ -60,9 +58,43 @@ func GetResourceYAML(ctx context.Context, restCfg *rest.Config, ns, kind, name s
 		return "", fmt.Errorf("erro ao criar dynamic client: %w", err)
 	}
 
+	// Fallback: busca manualmente nos ServerPreferredResources (útil para CRDs e variações)
+	if gvr.Empty() {
+		apiLists, err := disco.ServerPreferredResources()
+		if err != nil {
+			// aceitar parcial: continue mesmo se disco falhar
+		}
+		found := false
+		for _, apiList := range apiLists {
+			gv, err := schema.ParseGroupVersion(apiList.GroupVersion)
+			if err != nil {
+				continue
+			}
+			for _, api := range apiList.APIResources {
+				for _, cand := range candidates {
+					if strings.EqualFold(api.Kind, cand) {
+						gvr = schema.GroupVersionResource{Group: gv.Group, Version: gv.Version, Resource: api.Name}
+						namespaced = api.Namespaced
+						found = true
+						break
+					}
+				}
+				if found {
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("tipo de recurso não suportado ou não encontrado: %s", kind)
+		}
+	}
+
 	var res *unstructured.Unstructured
-	resource := dyn.Resource(mapping.Resource)
-	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+	resource := dyn.Resource(gvr)
+	if namespaced {
 		if ns == "all" || ns == "" {
 			return "", fmt.Errorf("namespace obrigatório para recursos com escopo de namespace")
 		}
