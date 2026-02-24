@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"log"
 	"k8s.io/client-go/kubernetes" // Importante para o tipo de retorno do helper
 	"k8s.io/client-go/rest"
 
@@ -317,6 +318,7 @@ func deleteClusterHandler(cfg *config.Config) gin.HandlerFunc {
 func getResourceYAMLHandler(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 1. Obtém cliente K8s reutilizando lógica do Helper
+		clusterID := c.Param("id")
 		_, restCfg, err := getK8sClientFromRequest(c, cfg)
 		if err != nil {
 			// O helper já escreveu o erro no JSON response
@@ -336,6 +338,7 @@ func getResourceYAMLHandler(cfg *config.Config) gin.HandlerFunc {
 		// 3. Chama função do pacote k8s (agora genérica)
 		yamlContent, err := k8s.GetResourceYAML(context.Background(), restCfg, ns, kind, name)
 		if err != nil {
+			log.Printf("getResourceYAML error: cluster=%s kind=%s namespace=%s name=%s err=%v", clusterID, kind, ns, name, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao buscar YAML: " + err.Error()})
 			return
 		}

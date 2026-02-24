@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,17 +34,29 @@ func GetResourceYAML(ctx context.Context, restCfg *rest.Config, ns, kind, name s
 	mapper := restmapper.NewDeferredDiscoveryRESTMapper(memory.NewMemCacheClient(disco))
 
 	// Primeiro tentamos via RESTMapper (boa opção para recursos core e bem registrados)
-	candidates := []string{kind, strings.Title(kind)}
-	if strings.HasSuffix(strings.ToLower(kind), "s") {
-		candidates = append(candidates, strings.TrimSuffix(strings.Title(kind), "s"))
+	// Mapeamento de abreviações comuns para canonical kinds
+	abbrev := map[string]string{
+		"svc":    "Service",
+		"rs":     "ReplicaSet",
+		"rc":     "ReplicationController",
+		"deploy": "Deployment",
+		"ds":     "DaemonSet",
+		"sts":    "StatefulSet",
+		"po":     "Pod",
+		"ing":    "Ingress",
+	}
+
+	candLower := strings.ToLower(kind)
+	var desiredKinds []string
+	if v, ok := abbrev[candLower]; ok {
+		desiredKinds = []string{v}
 	} else {
-		candidates = append(candidates, kind+"s")
+		desiredKinds = []string{kind, strings.Title(kind)}
 	}
 
 	var gvr schema.GroupVersionResource
 	var namespaced bool
-
-	for _, cand := range candidates {
+	for _, cand := range desiredKinds {
 		gk := schema.GroupKind{Kind: cand}
 		m, err := mapper.RESTMapping(gk, "")
 		if err == nil {
@@ -62,7 +75,7 @@ func GetResourceYAML(ctx context.Context, restCfg *rest.Config, ns, kind, name s
 	if gvr.Empty() {
 		apiLists, err := disco.ServerPreferredResources()
 		if err != nil {
-			// aceitar parcial: continue mesmo se disco falhar
+			log.Printf("GetResourceYAML: erro ao listar ServerPreferredResources: %v", err)
 		}
 		found := false
 		for _, apiList := range apiLists {
@@ -71,8 +84,19 @@ func GetResourceYAML(ctx context.Context, restCfg *rest.Config, ns, kind, name s
 				continue
 			}
 			for _, api := range apiList.APIResources {
-				for _, cand := range candidates {
-					if strings.EqualFold(api.Kind, cand) {
+				apiKindLower := strings.ToLower(api.Kind)
+				apiNameLower := strings.ToLower(api.Name)
+				for _, cand := range desiredKinds {
+					candLower := strings.ToLower(cand)
+					// 1) igualdade exata por Kind
+					if apiKindLower == candLower {
+						gvr = schema.GroupVersionResource{Group: gv.Group, Version: gv.Version, Resource: api.Name}
+						namespaced = api.Namespaced
+						found = true
+						break
+					}
+					// 2) igualdade por resource name (plural)
+					if apiNameLower == candLower || apiNameLower == candLower+"s" || apiNameLower == candLower+"es" {
 						gvr = schema.GroupVersionResource{Group: gv.Group, Version: gv.Version, Resource: api.Name}
 						namespaced = api.Namespaced
 						found = true
@@ -80,6 +104,7 @@ func GetResourceYAML(ctx context.Context, restCfg *rest.Config, ns, kind, name s
 					}
 				}
 				if found {
+					log.Printf("GetResourceYAML: matched requested kind='%s' to api.Kind='%s' api.Name='%s' gvr=%s", kind, api.Kind, api.Name, gvr.String())
 					break
 				}
 			}
@@ -100,13 +125,13 @@ func GetResourceYAML(ctx context.Context, restCfg *rest.Config, ns, kind, name s
 		}
 		resObj, err := resource.Namespace(ns).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("erro ao obter recurso namespaced %s/%s (%s): %w", ns, name, gvr.String(), err)
 		}
 		res = resObj
 	} else {
 		resObj, err := resource.Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("erro ao obter recurso cluster-scoped %s (%s): %w", name, gvr.String(), err)
 		}
 		res = resObj
 	}
