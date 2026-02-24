@@ -10,9 +10,10 @@ Aplicação web cloud-native para visualização interativa de topologia Kuberne
 
 ### Requisitos
 
-- Go 1.22+
+- Go 1.23+
 - Node.js 18+
 - Docker / Kubernetes (kind / minikube / cluster real)
+- PostgreSQL 14+ (local ou via Kubernetes)
 
 ### Backend - Desenvolvimento local
 
@@ -38,6 +39,8 @@ export LDAP_URL=ldap://ldap.example.com:389
 export LDAP_BASE_DN=dc=example,dc=com
 export LDAP_BIND_DN=cn=admin,dc=example,dc=com
 export LDAP_BIND_PASSWORD=admin
+export POLL_INTERVAL_SECONDS=15
+export MAX_CLUSTERS_PER_USER=20
 ```
 
 ### Frontend - Desenvolvimento local
@@ -69,6 +72,7 @@ kubectl create namespace vkube
 
 ```bash
 kubectl apply -n vkube -f deploy/postgres.yaml
+kubectl apply -n vkube -f deploy/backend-rbac.yaml
 kubectl apply -n vkube -f deploy/backend-config.yaml
 kubectl apply -n vkube -f deploy/backend-secret.yaml
 kubectl apply -n vkube -f deploy/backend.yaml
@@ -84,6 +88,14 @@ kubectl get pods -n vkube
 
 4. Acesse a aplicação via Ingress configurado.
 
+#### OpenShift (Route)
+
+Se estiver usando OpenShift, aplique a rota opcional:
+
+```bash
+kubectl apply -n vkube -f deploy/backend-route.yaml
+```
+
 ### Funcionalidades principais
 
 - Autenticação via LDAP com JWT
@@ -93,4 +105,3 @@ kubectl get pods -n vkube
 - Visualização de topologia em grafo (React Flow)
 - Filtros por namespace, collapse de pods, painel lateral de detalhes
 - Atualização periódica de topologia (polling)
-
