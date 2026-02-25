@@ -28,7 +28,7 @@ const LoginPage: React.FC = () => {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900">
       <div className="w-full max-w-md bg-slate-900/80 border border-slate-700 rounded-2xl shadow-2xl p-8 space-y-6">
         <h1 className="text-2xl font-semibold text-slate-50 text-center">Visual Kubernetes Topology</h1>
-        <p className="text-sm text-slate-400 text-center">Autenticação via LDAP</p>
+        <p className="text-sm text-slate-400 text-center">Autenticação local</p>
         <form className="space-y-4" onSubmit={handleSubmit}>
           <div>
             <label className="block text-sm font-medium text-slate-200 mb-1">Usuário</label>

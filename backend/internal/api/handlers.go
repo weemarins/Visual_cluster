@@ -8,8 +8,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"log"
+
+	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 	"k8s.io/client-go/kubernetes" // Importante para o tipo de retorno do helper
 	"k8s.io/client-go/rest"
 
@@ -44,68 +46,65 @@ func loginHandler(cfg *config.Config) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "payload inválido"})
 			return
 		}
-
-		// 🔐 LOGIN LOCAL DE MANUTENÇÃO (BREAK-GLASS)
-		if os.Getenv("ENABLE_LOCAL_LOGIN") == "true" {
-			if !auth.AuthenticateLocal(req.Username, req.Password) {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "credenciais inválidas"})
-				return
+		// Primeiro tentamos autenticar contra o DB
+		var user models.User
+		result := db.DB.Where("username = ?", req.Username).First(&user)
+		if result.Error == nil {
+			// usuário existe no DB: verificar senha
+			if len(user.PasswordHash) == 0 {
+				// Se ENABLE_LOCAL_LOGIN estiver ativo e for o local admin, tentar fallback local
+				if os.Getenv("ENABLE_LOCAL_LOGIN") == "true" {
+					localUser := os.Getenv("LOCAL_ADMIN_USER")
+					if localUser != "" && req.Username == localUser {
+						if !auth.AuthenticateLocal(req.Username, req.Password) {
+							c.JSON(http.StatusUnauthorized, gin.H{"error": "credenciais inválidas"})
+							return
+						}
+						// garantir que o papel seja admin
+						if user.Role == "" {
+							user.Role = "admin"
+							_ = db.DB.Save(&user)
+						}
+						// prosseguir para gerar token
+					} else {
+						c.JSON(http.StatusUnauthorized, gin.H{"error": "usuário sem senha definida"})
+						return
+					}
+				} else {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "usuário sem senha definida"})
+					return
+				}
+			} else {
+				if err := bcrypt.CompareHashAndPassword(user.PasswordHash, []byte(req.Password)); err != nil {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "credenciais inválidas"})
+					return
+				}
 			}
+		} else {
+			// usuário não encontrado no DB: permitir fallback de bootstrap/local-admin
+			if os.Getenv("ENABLE_LOCAL_LOGIN") == "true" {
+				if !auth.AuthenticateLocal(req.Username, req.Password) {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "credenciais inválidas"})
+					return
+				}
 
-			localUser := os.Getenv("LOCAL_ADMIN_USER")
-			if localUser == "" || req.Username != localUser {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "acesso não autorizado"})
-				return
-			}
+				localUser := os.Getenv("LOCAL_ADMIN_USER")
+				if localUser == "" || req.Username != localUser {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "acesso não autorizado"})
+					return
+				}
 
-			var user models.User
-			result := db.DB.Where("username = ?", localUser).First(&user)
-			if result.Error != nil {
+				// criar usuário admin se não existir
 				user = models.User{
 					Username:    localUser,
 					DisplayName: "Maintenance Admin",
 					Role:        "admin",
 				}
 				db.DB.Create(&user)
-			}
-
-			token, exp, err := auth.GenerateToken(user.Username, user.Role, cfg)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao gerar token"})
+			} else {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "credenciais inválidas"})
 				return
 			}
-
-			c.JSON(http.StatusOK, loginResponse{
-				Token:     token,
-				ExpiresAt: exp,
-				Username:  user.Username,
-				Role:      user.Role,
-			})
-			return
-		}
-
-		// 🔐 LOGIN PADRÃO (LDAP)
-		_, displayName, err := auth.LDAPAuthenticate(req.Username, req.Password, cfg)
-		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "credenciais inválidas"})
-			return
-		}
-
-		var user models.User
-		result := db.DB.Where("username = ?", req.Username).First(&user)
-		if result.Error != nil {
-			user = models.User{
-				Username:    req.Username,
-				DisplayName: displayName,
-				Role:        "viewer",
-			}
-
-			var count int64
-			db.DB.Model(&models.User{}).Count(&count)
-			if count == 0 {
-				user.Role = "admin"
-			}
-			db.DB.Create(&user)
 		}
 
 		token, exp, err := auth.GenerateToken(user.Username, user.Role, cfg)
@@ -121,8 +120,108 @@ func loginHandler(cfg *config.Config) gin.HandlerFunc {
 			Role:      user.Role,
 		})
 	}
+
 }
 
+// =====================
+// ADMIN - USER MANAGEMENT
+// =====================
+
+type createUserRequest struct {
+	Username    string `json:"username" binding:"required"`
+	DisplayName string `json:"displayName"`
+	Password    string `json:"password" binding:"required"`
+	Role        string `json:"role" binding:"required"`
+}
+
+func createUserHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req createUserRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "payload inválido"})
+			return
+		}
+
+		var exists int64
+		db.DB.Model(&models.User{}).Where("username = ?", req.Username).Count(&exists)
+		if exists > 0 {
+			c.JSON(http.StatusConflict, gin.H{"error": "usuário já existe"})
+			return
+		}
+
+		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao gerar hash de senha"})
+			return
+		}
+
+		user := models.User{
+			Username:     req.Username,
+			DisplayName:  req.DisplayName,
+			Role:         req.Role,
+			PasswordHash: hash,
+		}
+		if err := db.DB.Create(&user).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao criar usuário"})
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"username": user.Username, "role": user.Role, "displayName": user.DisplayName})
+	}
+}
+
+type resetPasswordRequest struct {
+	Password string `json:"password" binding:"required"`
+}
+
+func resetPasswordHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		username := c.Param("username")
+		var req resetPasswordRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "payload inválido"})
+			return
+		}
+		var user models.User
+		if err := db.DB.Where("username = ?", username).First(&user).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "usuário não encontrado"})
+			return
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao gerar hash de senha"})
+			return
+		}
+		user.PasswordHash = hash
+		if err := db.DB.Save(&user).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao salvar senha"})
+			return
+		}
+		c.Status(http.StatusNoContent)
+	}
+}
+
+func deleteUserHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		username := c.Param("username")
+		if err := db.DB.Where("username = ?", username).Delete(&models.User{}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao deletar usuário"})
+			return
+		}
+		c.Status(http.StatusNoContent)
+	}
+}
+
+func listUsersHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var users []models.User
+		db.DB.Find(&users)
+		out := make([]gin.H, 0, len(users))
+		for _, u := range users {
+			out = append(out, gin.H{"username": u.Username, "displayName": u.DisplayName, "role": u.Role})
+		}
+		c.JSON(http.StatusOK, out)
+	}
+}
 func meHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claimsVal, _ := c.Get("user")

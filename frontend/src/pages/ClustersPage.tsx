@@ -91,6 +91,11 @@ const ClustersPage: React.FC = () => {
               {username} <span className="text-sky-400 text-xs">({role})</span>
             </p>
           </div>
+          {role === 'admin' && (
+            <button onClick={() => navigate('/admin/users')} className="text-xs px-3 py-1 rounded-full border border-slate-600 text-slate-200 hover:bg-slate-800 mr-2">
+              Gerenciar
+            </button>
+          )}
           <button
             onClick={logout}
             className="text-xs px-3 py-1 rounded-full border border-slate-600 text-slate-200 hover:bg-slate-800"
