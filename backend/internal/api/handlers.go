@@ -46,8 +46,11 @@ func loginHandler(cfg *config.Config) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "payload inválido"})
 			return
 		}
-		// Primeiro tentamos autenticar contra o DB
+
+		// Tentamos usar cache primeiro para performance (mas ainda validamos a senha)
 		var user models.User
+		
+		// Busca o usuário no banco
 		result := db.DB.Where("username = ?", req.Username).First(&user)
 		if result.Error == nil {
 			// usuário existe no DB: verificar senha
@@ -112,6 +115,9 @@ func loginHandler(cfg *config.Config) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao gerar token"})
 			return
 		}
+
+		// Cache o login para validações futuras rápidas
+		auth.SetCachedLogin(user.Username, user.Role)
 
 		c.JSON(http.StatusOK, loginResponse{
 			Token:     token,
@@ -230,6 +236,60 @@ func meHandler() gin.HandlerFunc {
 			"username": claims.Username,
 			"role":     claims.Role,
 		})
+	}
+}
+
+type changePasswordRequest struct {
+	OldPassword string `json:"oldPassword" binding:"required"`
+	NewPassword string `json:"newPassword" binding:"required"`
+}
+
+func changePasswordHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		claimsVal, _ := c.Get("user")
+		claims := claimsVal.(*auth.Claims)
+
+		var req changePasswordRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "payload inválido"})
+			return
+		}
+
+		// Validação básica
+		if len(req.NewPassword) < 6 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "nova senha deve ter no mínimo 6 caracteres"})
+			return
+		}
+
+		var user models.User
+		if err := db.DB.Where("username = ?", claims.Username).First(&user).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "usuário não encontrado"})
+			return
+		}
+
+		// Verifica senha antiga
+		if err := bcrypt.CompareHashAndPassword(user.PasswordHash, []byte(req.OldPassword)); err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "senha atual incorreta"})
+			return
+		}
+
+		// Gera nova senha
+		hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao gerar hash de senha"})
+			return
+		}
+
+		user.PasswordHash = hash
+		if err := db.DB.Save(&user).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "erro ao salvar senha"})
+			return
+		}
+
+		// Invalida cache de login para forçar re-autenticação
+		auth.InvalidateCachedLogin(claims.Username)
+
+		c.JSON(http.StatusOK, gin.H{"message": "senha alterada com sucesso"})
 	}
 }
 

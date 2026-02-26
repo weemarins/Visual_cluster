@@ -3,10 +3,12 @@ package main
 import (
 	"log"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/example/vkube-topology/backend/internal/api"
+	"github.com/example/vkube-topology/backend/internal/auth"
 	"github.com/example/vkube-topology/backend/internal/config"
 	"github.com/example/vkube-topology/backend/internal/db"
 )
@@ -35,6 +37,15 @@ func main() {
 
 	// Registra rotas da API
 	api.RegisterRoutes(r, cfg)
+
+	// Inicia routine de limpeza de cache de login expirado
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			auth.CleanupExpiredLogins()
+		}
+	}()
 
 	port := cfg.AppPort
 	if port == "" {

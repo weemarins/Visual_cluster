@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../services/api';
 import { useAuth } from '../auth/AuthContext';
+import ChangePasswordModal from '../components/ChangePasswordModal';
 
 type Cluster = {
   id: number;
@@ -19,6 +20,7 @@ const ClustersPage: React.FC = () => {
   const [description, setDescription] = useState('');
   const [kubeconfig, setKubeconfig] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
 
   const navigate = useNavigate();
 
@@ -97,6 +99,12 @@ const ClustersPage: React.FC = () => {
               Gerenciar
             </button>
           )}
+          <button
+            onClick={() => setShowChangePasswordModal(true)}
+            className="text-xs px-3 py-1 rounded-full border border-slate-600 text-slate-200 hover:bg-slate-800"
+          >
+            Alterar Senha
+          </button>
           <button
             onClick={logout}
             className="text-xs px-3 py-1 rounded-full border border-slate-600 text-slate-200 hover:bg-slate-800"
@@ -197,6 +205,11 @@ const ClustersPage: React.FC = () => {
             </form>
           </section>
       </main>
+
+      <ChangePasswordModal
+        isOpen={showChangePasswordModal}
+        onClose={() => setShowChangePasswordModal(false)}
+      />
     </div>
   );
 };

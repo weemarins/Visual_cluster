@@ -18,6 +18,7 @@ func RegisterRoutes(r *gin.Engine, cfg *config.Config) {
 	{
 		authGroup.POST("/login", loginHandler(cfg))
 		authGroup.GET("/me", auth.AuthMiddleware(cfg), meHandler())
+		authGroup.POST("/change-password", auth.AuthMiddleware(cfg), changePasswordHandler())
 		// User management (admin only)
 		authGroup.GET("/users", auth.AuthMiddleware(cfg), auth.RequireRole("admin"), listUsersHandler())
 		authGroup.POST("/users", auth.AuthMiddleware(cfg), auth.RequireRole("admin"), createUserHandler())
