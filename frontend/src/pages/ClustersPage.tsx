@@ -7,6 +7,7 @@ type Cluster = {
   id: number;
   name: string;
   description: string;
+  ownerUsername: string;
 };
 
 const ClustersPage: React.FC = () => {
@@ -139,7 +140,7 @@ const ClustersPage: React.FC = () => {
                     Ver topologia
                   </span>
 
-                  {role === 'admin' && (
+                  {(role === 'admin' || username === c.ownerUsername) && (
                     <button
                       onClick={e => {
                         e.stopPropagation();
@@ -156,8 +157,7 @@ const ClustersPage: React.FC = () => {
           </ul>
         </section>
 
-        {role === 'admin' && (
-          <section className="flex-none w-full lg:w-80 min-h-0 bg-slate-900/70 border border-slate-800 rounded-xl p-4 overflow-auto">
+        <section className="flex-none w-full lg:w-80 min-h-0 bg-slate-900/70 border border-slate-800 rounded-xl p-4 overflow-auto">
             <h2 className="text-sm font-semibold text-slate-200 mb-4">Novo cluster</h2>
             <form className="space-y-3" onSubmit={handleCreate}>
               <div>
@@ -196,7 +196,6 @@ const ClustersPage: React.FC = () => {
               </button>
             </form>
           </section>
-        )}
       </main>
     </div>
   );

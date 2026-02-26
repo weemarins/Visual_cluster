@@ -238,9 +238,10 @@ func meHandler() gin.HandlerFunc {
 // =================================================================================
 
 type clusterDTO struct {
-	ID          uint   `json:"id"`
-	Name        string `json:"name" binding:"required"`
-	Description string `json:"description"`
+	ID            uint   `json:"id"`
+	Name          string `json:"name" binding:"required"`
+	Description   string `json:"description"`
+	OwnerUsername string `json:"ownerUsername"`
 }
 
 type createClusterRequest struct {
@@ -260,9 +261,10 @@ func listClustersHandler(cfg *config.Config) gin.HandlerFunc {
 		resp := make([]clusterDTO, 0, len(clusters))
 		for _, cl := range clusters {
 			resp = append(resp, clusterDTO{
-				ID:          cl.ID,
-				Name:        cl.Name,
-				Description: cl.Description,
+				ID:            cl.ID,
+				Name:          cl.Name,
+				Description:   cl.Description,
+				OwnerUsername: cl.OwnerUsername,
 			})
 		}
 		c.JSON(http.StatusOK, resp)
@@ -305,9 +307,10 @@ func createClusterHandler(cfg *config.Config) gin.HandlerFunc {
 		}
 
 		c.JSON(http.StatusCreated, clusterDTO{
-			ID:          cluster.ID,
-			Name:        cluster.Name,
-			Description: cluster.Description,
+			ID:            cluster.ID,
+			Name:          cluster.Name,
+			Description:   cluster.Description,
+			OwnerUsername: cluster.OwnerUsername,
 		})
 	}
 }

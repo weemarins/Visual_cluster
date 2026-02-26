@@ -30,12 +30,12 @@ func RegisterRoutes(r *gin.Engine, cfg *config.Config) {
 	clusterGroup.Use(auth.AuthMiddleware(cfg))
 	{
 		clusterGroup.GET("", listClustersHandler(cfg))
-		clusterGroup.POST("", auth.RequireRole("admin"), createClusterHandler(cfg))
+		clusterGroup.POST("", createClusterHandler(cfg))
 
 		// Rotas específicas de um Cluster
 		clusterGroup.GET("/:id", getClusterHandler(cfg))
-		clusterGroup.PUT("/:id", auth.RequireRole("admin"), updateClusterHandler(cfg))
-		clusterGroup.DELETE("/:id", auth.RequireRole("admin"), deleteClusterHandler(cfg))
+		clusterGroup.PUT("/:id", updateClusterHandler(cfg))
+		clusterGroup.DELETE("/:id", deleteClusterHandler(cfg))
 
 		// --- NOVAS ROTAS DE RECURSOS (YAML & LOGS) ---
 		// Ex: /api/v1/clusters/1/resources/yaml?kind=Pod&name=meu-pod&namespace=default
